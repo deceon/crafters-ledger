@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "slug": "crafters-ledger",
   "name": "Crafters Ledger",
-  "version": "3.2.11",
+  "version": "3.2.12",
   "description": "A crafting planner and saved shopping list. Search recipes, check skill requirements and output, and add materials for your batch. Expand each crafted item to see its supplies. Tracks carried inventory and what you still need, with saved lists and recipe labels. Open with /ledger or the book-and-quill icon. Bank and house storage support is a feature request.",
   "author": "Kronic",
   "files": [

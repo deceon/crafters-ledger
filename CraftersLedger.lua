@@ -1,5 +1,5 @@
--- Crafters Ledger v3.2.10. Legacy ShoppingCart commands and save file remain compatible.
-ShoppingCart = {items={},projects={},sources={}}
+-- Crafters Ledger v3.2.12. Legacy ShoppingCart commands and save file remain compatible.
+ShoppingCart = {items={},projects={},sources={},amounts={}}
 MarketBasket = ShoppingCart
 CraftersLedger = ShoppingCart
 local C=ShoppingCart
@@ -26,6 +26,16 @@ function C.save()
                 for title in pairs(sources) do f:write('@source\t',name,'\t',title,'\n') end
             end
         end
+        -- per-recipe share of each material, so removing a recipe can take back its amount
+        for name,shares in pairs(C.amounts) do
+            if C.items[name] then
+                for title,n in pairs(shares) do
+                    if C.sources[name] and C.sources[name][title] then
+                        f:write('@amount\t',name,'\t',title,'\t',tostring(n),'\n')
+                    end
+                end
+            end
+        end
         f:close()
     end)
     if not ok then say('Save failed: '..tostring(err)); return false end
@@ -46,10 +56,41 @@ function C.set(name,quantity)
         say('Use ShoppingCart.set("Item Name", positive whole number)'); return
     end
     C.items[name]=quantity
+    -- one recipe using it: that recipe's share is the whole target now
+    local only,count=nil,0
+    for title in pairs(C.sources[name] or {}) do only=title; count=count+1 end
+    if count==1 then C.amounts[name]={[only]=quantity} end
     if C.save() then say('Saved.') end
 end
 function C.remove(name)
-    C.items[name]=nil; C.sources[name]=nil; C.save(); say('Removed: '..tostring(name))
+    C.items[name]=nil; C.sources[name]=nil; C.amounts[name]=nil; C.save(); say('Removed: '..tostring(name))
+end
+-- Takes a whole recipe off the list: its label, its craft count and the
+-- materials it added. Materials shared with other recipes keep the other
+-- recipes' amounts.
+function C.removeRecipe(title)
+    if not valid(title) then return 0 end
+    local removed,kept=0,0
+    for name,sources in pairs(C.sources) do
+        if sources[title] then
+            sources[title]=nil
+            local share=C.amounts[name] and C.amounts[name][title]
+            if C.amounts[name] then C.amounts[name][title]=nil end
+            if next(sources)==nil then
+                C.items[name]=nil; C.sources[name]=nil; C.amounts[name]=nil; removed=removed+1
+            else
+                if share and C.items[name] then
+                    local left=C.items[name]-share
+                    if left>=1 then C.items[name]=left else C.items[name]=1 end
+                end
+                kept=kept+1
+            end
+        end
+    end
+    C.projects[title]=nil
+    C.save()
+    say('Removed recipe: '..title)
+    return removed,kept
 end
 function C.show()
     local ok,inventory=pcall(ShroudGetInventoryItems)
@@ -99,6 +140,10 @@ local function loadCart()
         elseif line:sub(1,8)=='@source\t' then
             local name,title=line:match('^@source\t([^\t]+)\t([^\t]+)$')
             if valid(name) and valid(title) then C.sources[name]=C.sources[name] or {}; C.sources[name][title]=true end
+        elseif line:sub(1,8)=='@amount\t' then
+            local name,title,n=line:match('^@amount\t([^\t]+)\t([^\t]+)\t(%d+)$')
+            n=tonumber(n)
+            if valid(name) and valid(title) and n then C.amounts[name]=C.amounts[name] or {}; C.amounts[name][title]=n end
         else
             local name,n=line:match('^(.-)\t(%d+)$')
             n=tonumber(n)
@@ -215,14 +260,28 @@ refreshCart=function()
             local title=titles[i]
             local project=C.projects[title]
             local content=UI.Column{visible=expanded[title]==true,style={paddingLeft=18,paddingBottom=8}}
-            content:Add(row{flexLabel('Material'),label('To get',70),label('Have',65),label('Needed',65),label('',65)})
+            content:Add(row{flexLabel('Material'),label('To get',70),label('Have',65),label('Needed',115),label('',65)})
             for _,name in ipairs(groups[title]) do
-                local target=label('',65); local amount=label('',65); local missing=label('',70)
-                local cell={name=name,target=target,amount=amount,status=missing}
+                local amount=label('',65); local missing=label('',70)
+                local target
+                local function setNeeded()
+                    local n=number(trim(target:GetText()))
+                    if not n then
+                        msg('Needed must be a whole number, 1 or more. Use Remove to take '..name..' off the list.')
+                        target:SetText(tostring(C.items[name] or '')); return
+                    end
+                    if not C.items[name] then return end
+                    C.set(name,n); refreshCart()
+                    msg('Needed for '..name..' is now '..n..'.')
+                end
+                target=UI.TextField{text=tostring(C.items[name] or ''),maxLength=7,style={width=65},
+                    tooltip='Type the amount you need, then press Enter or Set',onSubmit=setNeeded}
+                local cell={name=name,target=target,amount=amount,status=missing,lastTarget=C.items[name]}
                 cartCells[#cartCells+1]=cell
                 local sourceCount=0; for _ in pairs(C.sources[name] or {}) do sourceCount=sourceCount+1 end
                 local nameLabel=sourceCount>1 and (name..' (shared total)') or name
                 content:Add(row{flexLabel(nameLabel),missing,amount,target,
+                    UI.Button{text='Set',style={width=46},onClick=setNeeded},
                     UI.Button{text='Remove',style={width=65},onClick=function() C.remove(name); refreshCart() end}})
             end
             local toggle
@@ -230,7 +289,26 @@ refreshCart=function()
                 expanded[title]=not expanded[title]
                 content:SetVisible(expanded[title]); toggle:SetText(expanded[title] and '-' or '+')
             end}
-            local children={row{toggle,UI.Label{text=title,class='heading',style={flexGrow=1,flexShrink=1,whiteSpace='wrap',fontSize=16}}}}
+            local header={toggle,UI.Label{text=title,class='heading',style={flexGrow=1,flexShrink=1,whiteSpace='wrap',fontSize=16}}}
+            if title~='Other materials' then
+                -- X takes the whole recipe off the list; it asks once before removing
+                local sure=false
+                local drop
+                drop=UI.Button{text='X',style={width=70},tooltip='Remove this recipe and its materials from the list',
+                    onClick=function()
+                        if not sure then
+                            sure=true; drop:SetText('Sure?')
+                            msg('Click Sure? to remove '..title..' and its materials. Materials other recipes use stay.')
+                            return
+                        end
+                        local removed,kept=C.removeRecipe(title)
+                        expanded[title]=nil; refreshCart()
+                        msg('Removed '..title..': '..removed..' materials removed'..
+                            (kept>0 and (', '..kept..' shared materials kept for other recipes.') or '.'))
+                    end}
+                header[#header+1]=drop
+            end
+            local children={row(header)}
             if project then children[#children+1]=label(project.crafts..' crafts'..
                 ((project.output or '')~='' and (' | '..project.output) or '')) end
             children[#children+1]=content
@@ -244,10 +322,10 @@ refreshCart=function()
         local target=C.items[cell.name]
         local n=have and (have[string.lower(cell.name)] or 0)
         local text=n and tostring(n) or '?'
-        local missing=n and math.max(0,target-n)
+        local missing=n and target and math.max(0,target-n)
         local status=missing and tostring(missing) or '?'
         local color=missing==0 and '@green' or '@red'
-        if cell.lastTarget~=target then cell.target:SetText(tostring(target)); cell.lastTarget=target end
+        if target and cell.lastTarget~=target then cell.target:SetText(tostring(target)); cell.lastTarget=target end
         if cell.lastText~=text then cell.amount:SetText(text); cell.lastText=text end
         if cell.lastStatus~=status then cell.status:SetText(status); cell.lastStatus=status end
         if cell.lastColor~=color then cell.status:SetStyle{color=color}; cell.lastColor=color end
@@ -395,6 +473,10 @@ local function addRecipe(linkOnly)
         end
         if C.items[r.name] then
             C.sources[r.name]=C.sources[r.name] or {}; C.sources[r.name][title]=true; linked=linked+1
+            if linkOnly~=true and not r.tool then
+                C.amounts[r.name]=C.amounts[r.name] or {}
+                C.amounts[r.name][title]=(C.amounts[r.name][title] or 0)+r.quantity
+            end
         end
     end
     if linked==0 then msg('No matching materials already in your list. Use Add ingredients instead.'); return end

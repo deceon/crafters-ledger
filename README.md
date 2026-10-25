@@ -1,10 +1,12 @@
 # Crafters Ledger
 
-Creator: Kronic | Version 3.2.10
+Creator: Kronic | Version 3.2.12
 
 A crafting planner and saved shopping list. Search your recipe book, see the required skill level and expected output, and choose how many times you want to craft. Add the ingredients to your shopping list, grouped under the item you are making so you always know what your supplies are for.
 
 Click + beside an item to see its materials, or - to collapse them. The list compares what you are carrying with what you need and updates quantities automatically as you collect or use supplies. Filter by To get, All, or Ready, or search for a recipe or material.
+
+Made a mistake? Type a new amount in a material's Needed box and press Enter or Set. Click X beside a recipe, then Sure?, to take the whole recipe and its materials off the list; materials another recipe also uses stay, with that recipe's amount.
 
 Add individual materials or paste a custom list. You can also label existing supplies with a recipe without increasing their quantities. Your list and recipe labels are saved between sessions.
 

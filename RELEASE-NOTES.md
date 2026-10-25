@@ -1,3 +1,10 @@
+# Crafters Ledger 3.2.12
+
+Shopping list fixes for mistakes.
+
+- Needed is now editable: type the amount and press Enter or Set.
+- X next to a recipe in the shopping list removes the whole recipe and the materials it added (click X, then Sure? to confirm). Materials another recipe also uses stay, with that recipe's amount.
+
 # Crafters Ledger 3.2.10
 
 Initial GitHub release of the crafting planner and saved shopping list.
