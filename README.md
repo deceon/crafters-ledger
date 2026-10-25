@@ -1,6 +1,6 @@
 # Crafters Ledger
 
-Creator: Kronic | Version 3.2.7
+Creator: Kronic | Version 3.2.10
 
 A crafting planner and saved shopping list. Search your recipe book, see the required skill level and expected output, and choose how many times you want to craft. Add the ingredients to your shopping list, grouped under the item you are making so you always know what your supplies are for.
 
@@ -14,4 +14,4 @@ Counts carried inventory only. Bank and house storage support is a new feature r
 
 ## Installation
 
-Import or extract the complete Crafters Ledger folder, including manifest.json and icon.png. Disable older copies before enabling this version. Keep CraftersLedger-data.tsv and ShoppingCart-data.tsv in the main Lua folder to preserve saved lists. Run /lua reload after updating.
+Import or extract the complete crafters-ledger folder, including manifest.json and icon.png. Disable older copies before enabling this version. Keep CraftersLedger-data.tsv and ShoppingCart-data.tsv in the main Lua folder to preserve saved lists. Run /lua reload after updating.
