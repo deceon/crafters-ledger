@@ -1,3 +1,10 @@
+# Crafters Ledger 3.2.17
+
+Republishes the 3.2.16 fixes. The store's 3.2.16 package was built from older files and still had the launcher error.
+
+- The shopping list stays inside the window and scrolls when expanded recipes run past the bottom.
+- Fixed the HUD launcher button failing to load ("cannot access field Show").
+
 # Crafters Ledger 3.2.16
 
 Shopping list scrolling fix and launcher fix.

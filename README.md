@@ -1,6 +1,6 @@
 # Crafters Ledger
 
-Creator: Kronic | Version 3.2.16
+Creator: Kronic | Version 3.2.17
 
 A crafting planner and saved shopping list. Search your recipe book, see the required skill level and expected output, and choose how many times you want to craft. Add the ingredients to your shopping list, grouped under the item you are making so you always know what your supplies are for.
 
