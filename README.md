@@ -20,4 +20,4 @@ Import or extract the complete crafters-ledger folder, including manifest.json a
 
 ## 3.2.13
 
-The shopping list stays inside the available window area. Use the mouse wheel or drag the native scrollbar when expanded recipes extend below the list. Search, filters, totals, and page controls remain outside the scrolling area.
+The shopping list now stays inside the available window area. Scroll with the mouse wheel or drag the native scrollbar when expanded recipes extend below the list. Search, filters, totals, and page controls stay outside the scrolling area.

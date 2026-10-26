@@ -1,4 +1,4 @@
--- Crafters Ledger v3.2.13. Legacy ShoppingCart commands and save file remain compatible.
+-- Crafters Ledger v3.2.15. Legacy ShoppingCart commands and save file remain compatible.
 ShoppingCart = {items={},projects={},sources={},amounts={}}
 MarketBasket = ShoppingCart
 CraftersLedger = ShoppingCart
@@ -675,3 +675,4 @@ function ShroudOnDisableScript()
     if win then pcall(function() win:Destroy() end); win=nil end
     if launcher then pcall(function() launcher:Destroy() end); launcher=nil end
 end
+
