@@ -1,3 +1,11 @@
+# Crafters Ledger 3.2.15
+
+Shopping list scrolling fix and launcher fix.
+
+- The shopping list now stays inside the window. When expanded recipes run past the bottom, scroll with the mouse wheel or drag the scrollbar.
+- Search, filters, totals and page controls stay fixed outside the scrolling area.
+- Fixed the HUD launcher button failing to load ("cannot access field Show").
+
 # Crafters Ledger 3.2.12
 
 Shopping list fixes for mistakes.

@@ -642,7 +642,6 @@ function ShroudOnStart()
                     style={width=46,height=46},onClick=function() C.toggle() end}
             end
             launcher=UI.HudFrame{id='crafters_ledger_launcher',x=20,y=300,width=50,height=50,children={button}}
-            launcher:Show()
         end
     end)
     if not ok then say('Cart button unavailable: '..tostring(err)) end
