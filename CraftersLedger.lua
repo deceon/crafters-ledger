@@ -1,4 +1,4 @@
--- Crafters Ledger v3.2.12. Legacy ShoppingCart commands and save file remain compatible.
+-- Crafters Ledger v3.2.13. Legacy ShoppingCart commands and save file remain compatible.
 ShoppingCart = {items={},projects={},sources={},amounts={}}
 MarketBasket = ShoppingCart
 CraftersLedger = ShoppingCart
@@ -189,7 +189,7 @@ local function flexLabel(text)
     return UI.Label{text=tostring(text),style={flexGrow=1,flexShrink=1,whiteSpace='wrap',fontSize=13}}
 end
 local function row(children)
-    return UI.Row{style={alignItems='center',marginTop=4},children=children}
+    return UI.Row{style={alignItems='center',marginTop=4,flexShrink=0},children=children}
 end
 local function counts()
     local ok,items=pcall(ShroudGetInventoryItems)
@@ -259,7 +259,7 @@ refreshCart=function()
         for i=(page-1)*PAGE+1,math.min(page*PAGE,#titles) do
             local title=titles[i]
             local project=C.projects[title]
-            local content=UI.Column{visible=expanded[title]==true,style={paddingLeft=18,paddingBottom=8}}
+            local content=UI.Column{visible=expanded[title]==true,style={paddingLeft=18,paddingBottom=8,flexShrink=0}}
             content:Add(row{flexLabel('Material'),label('To get',70),label('Have',65),label('Needed',115),label('',65)})
             for _,name in ipairs(groups[title]) do
                 local amount=label('',65); local missing=label('',70)
@@ -312,7 +312,7 @@ refreshCart=function()
             if project then children[#children+1]=label(project.crafts..' crafts'..
                 ((project.output or '')~='' and (' | '..project.output) or '')) end
             children[#children+1]=content
-            el.cart:Add(UI.Column{style={paddingTop=8,paddingBottom=8,marginBottom=6},children=children})
+            el.cart:Add(UI.Column{style={paddingTop=8,paddingBottom=8,marginBottom=6,flexShrink=0},children=children})
         end
         if #titles==0 then el.cart:Add(label(total==0 and 'Your list is empty. Add a recipe or materials to begin.'
             or 'No materials match this view. Choose All to see completed entries.')) end
@@ -523,7 +523,8 @@ local function buildUI()
     el.matches=UI.Column{}
     el.matchPage=label('Search your recipe book')
     el.preview=UI.Column{}
-    el.cart=UI.Column{}
+    -- Keep content at its natural height so the Scroll can measure overflow.
+    el.cart=UI.Column{style={flexShrink=0,paddingRight=18}}
     el.cartPage=label('')
     el.message=label('Choose a recipe or add materials. Existing shopping targets are preserved.')
     el.item=UI.TextField{text='',placeholder='Exact item name',style={flexGrow=1}}
@@ -536,11 +537,13 @@ local function buildUI()
         onChange=function(_,value) cartQuery=string.lower(trim(value)); page=1; refreshCart() end}
     local viewPicker=UI.Dropdown{choices={'To get','All','Ready'},value='To get',style={width=140},
         onChange=function(_,value) cartFilter=value; page=1; refreshCart() end}
-    local shopPage=UI.Column{visible=false,style={flexGrow=1},children={
+    -- A zero starting height makes this page fill the remaining window space,
+    -- rather than growing the window layout to fit every expanded recipe.
+    local shopPage=UI.Column{visible=false,style={height=0,flexGrow=1,flexShrink=1},children={
         el.summary,
         row{listSearch,viewPicker,UI.Button{text='Refresh counts',onClick=refreshCart}},
         label('Click + to see materials, - to hide them. Shared materials show combined shopping-list totals.'),
-        UI.Scroll{style={flexGrow=1},children={el.cart}},
+        UI.Scroll{id='ledger_shopping_scroll',style={height=0,flexGrow=1,flexShrink=1},children={el.cart}},
         row{UI.Button{text='Previous',onClick=function() page=math.max(1,page-1); refreshCart() end},el.cartPage,
             UI.Button{text='Next',onClick=function() page=page+1; refreshCart() end}},
     }}
