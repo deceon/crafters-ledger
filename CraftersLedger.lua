@@ -1,4 +1,4 @@
--- Crafters Ledger v3.2.15. Legacy ShoppingCart commands and save file remain compatible.
+-- Crafters Ledger v3.2.16. Legacy ShoppingCart commands and save file remain compatible.
 ShoppingCart = {items={},projects={},sources={},amounts={}}
 MarketBasket = ShoppingCart
 CraftersLedger = ShoppingCart

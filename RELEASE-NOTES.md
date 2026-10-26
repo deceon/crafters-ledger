@@ -1,4 +1,4 @@
-# Crafters Ledger 3.2.15
+# Crafters Ledger 3.2.16
 
 Shopping list scrolling fix and launcher fix.
 
