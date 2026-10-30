@@ -900,6 +900,14 @@ end
 -- The compass: the game's search says which scene and container hold an item, not where the container
 -- stands. Stand by a chest and click Mark to remember its spot; Compass then points the game's compass
 -- (its beacon, the one /beacon sets) at it while you're in that scene.
+-- The game's location can carry an internal scene name, like "Ivory Stronghold: BasementSceneDungeonTown_Arena
+-- (Town Lot Basement)". Show it as "Ivory Stronghold (Town Lot Basement)"; saved marks still use the full text.
+local function niceLocation(loc)
+    local out=tostring(loc or '')
+    out=out:gsub(':%s*[%w_]*Scene[%w_]*',''):gsub(':%s*%w+_[%w_]+','')
+    out=out:gsub('%s+',' '):gsub('^%s+',''):gsub('%s+$','')
+    return out
+end
 local function spotKey(loc,box) return string.lower(tostring(loc)..'|'..tostring(box)) end
 local function hereRaw()
     if type(ShroudGetCurrentSceneNameRaw)~='function' then return nil end
@@ -937,7 +945,7 @@ local function pointAt(loc,box)
     local sp=C.spots[key]
     if not sp then return end
     if hereRaw()~=sp.raw then
-        msg(box..' is in '..tostring(loc)..'. Go there, then click Compass again.'); return
+        msg(box..' is in '..niceLocation(loc)..'. Go there, then click Compass again.'); return
     end
     if type(ShroudSetBeacon)~='function' then msg('This game client cannot set the compass.'); return end
     local ok,set=pcall(ShroudSetBeacon,sp.x,sp.y,sp.z,tostring(box):gsub('[%[%]<>]',''):sub(1,40))
@@ -1008,7 +1016,7 @@ local function fillWhere(cell)
             header[1]=UI.Label{text='',style={width=32,flexShrink=0}}
         end
         -- the game's location already starts with "Inventory:" or "Bank:"; say it once
-        local where=p.label:gsub('^Inventory:%s*',''):gsub('^Bank:%s*','')
+        local where=niceLocation(p.label:gsub('^Inventory:%s*',''):gsub('^Bank:%s*',''))
         header[#header+1]=flexLabel((PLACE_NAMES[p.place] or p.place)..': '..where)
         header[#header+1]=label(tostring(p.total),70)
         cell.where:Add(row(header))
