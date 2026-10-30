@@ -916,17 +916,35 @@ local function markSpot(loc,box)
     msg('Marked where you stand as '..box..'. Compass will point here from anywhere in this scene.')
     return true
 end
+local beaconOn=nil          -- the chest the compass points at now (set by this add-on)
+local function clearCompass()
+    local ok=type(ShroudClearBeacon)=='function' and pcall(ShroudClearBeacon)
+    if not ok then
+        -- older clients: the game's own command clears it
+        if Shroud and type(Shroud.RunCommand)=='function' then ok=pcall(Shroud.RunCommand,'/beacon clear') end
+    end
+    beaconOn=nil
+    msg(ok and 'Compass cleared.' or 'Type /beacon clear to clear the compass.')
+end
+local function unmarkSpot(loc,box)
+    local key=spotKey(loc,box)
+    if beaconOn==key then clearCompass() end
+    C.spots[key]=nil; C.save()
+    msg('Forgot where '..box..' is.')
+end
 local function pointAt(loc,box)
-    local sp=C.spots[spotKey(loc,box)]
+    local key=spotKey(loc,box)
+    local sp=C.spots[key]
     if not sp then return end
     if hereRaw()~=sp.raw then
         msg(box..' is in '..tostring(loc)..'. Go there, then click Compass again.'); return
     end
     if type(ShroudSetBeacon)~='function' then msg('This game client cannot set the compass.'); return end
     local ok,set=pcall(ShroudSetBeacon,sp.x,sp.y,sp.z,tostring(box):gsub('[%[%]<>]',''):sub(1,40))
-    if ok and set~=false then msg('Your compass points at '..box..'. Type /beacon clear to remove it.')
+    if ok and set~=false then beaconOn=key; msg('Your compass points at '..box..'. Click Clear compass to remove it.')
     else msg('The game did not set the compass right now. Try again in a moment.') end
 end
+local redrawWhere
 local function fillWhere(cell)
     cell.where:Clear()
     local k=string.lower(cell.name)
@@ -956,14 +974,24 @@ local function fillWhere(cell)
             local parts={flexLabel(box),label(tostring(p.boxes[box]),70)}
             if findable then
                 local known=C.spots[spotKey(p.label,box)]~=nil
+                local key=spotKey(p.label,box)
                 if known then
-                    parts[#parts+1]=UI.Button{text='Compass',style={width=90},
-                        tooltip='Point your compass at '..box..' (works in its scene)',
-                        onClick=function() pointAt(p.label,box) end}
+                    local pointing=beaconOn==key
+                    parts[#parts+1]=UI.Button{text=pointing and 'Clear compass' or 'Compass',style={width=pointing and 130 or 90},
+                        tooltip=pointing and 'Stop pointing your compass at '..box or 'Point your compass at '..box..' (works in its scene)',
+                        onClick=function()
+                            if beaconOn==key then clearCompass() else pointAt(p.label,box) end
+                            redrawWhere()
+                        end}
                 end
                 parts[#parts+1]=UI.Button{text=known and 'Re-mark' or 'Mark',style={width=80},
                     tooltip='Stand next to '..box..' and click to remember where it is, for the compass',
-                    onClick=function() if markSpot(p.label,box) then fillWhere(cell) end end}
+                    onClick=function() if markSpot(p.label,box) then redrawWhere() end end}
+                if known then
+                    parts[#parts+1]=UI.Button{text='Unmark',style={width=80},
+                        tooltip='Forget where '..box..' is',
+                        onClick=function() unmarkSpot(p.label,box); redrawWhere() end}
+                end
             end
             inside:Add(row(parts))
         end
@@ -990,6 +1018,11 @@ local function fillWhere(cell)
         cell.where:Add(row{UI.Label{text='',style={width=32,flexShrink=0}},flexLabel('Total'),label(tostring(haveOf(cell.name,counts()) or '...'),70)})
     end
     if o.truncated then cell.where:Add(label('The game cut this list short; totals are still complete.')) end
+end
+redrawWhere=function()
+    for _,c in ipairs(itemCells) do
+        if itemOpen[string.lower(c.name)] then fillWhere(c); c.version=ownedVersion end
+    end
 end
 renderItems=function()
     if not el.itemResults then return end
