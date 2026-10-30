@@ -1,6 +1,6 @@
 # Crafters Ledger
 
-Creator: Kronic | Version 3.2.17
+Creator: Kronic | Version 3.3.0
 
 A crafting planner and saved shopping list. Search your recipe book, see the required skill level and expected output, and choose how many times you want to craft. Add the ingredients to your shopping list, grouped under the item you are making so you always know what your supplies are for.
 
@@ -12,7 +12,11 @@ Add individual materials or paste a custom list. You can also label existing sup
 
 Show or hide Crafters Ledger with the book-and-quill icon or its key in the Add-Ons window. Open it with /ledger.
 
-Counts carried inventory only. Bank and house storage support is a new feature request.
+Find items searches every item your recipes make or use. Type part of a name, like garnet, and see how many you own and where. Click Where to see the exact bag, bank container or house chest.
+
+Use the Inventory and Account checkboxes at the top to choose what Have counts: your bag, your account (bank, house chests, other characters, mail, vendor listings), or both. Account counts need a game client with Lua API 55 or later.
+
+Turn on the on-screen tracker from the shopping list (Show / hide) or with /ledgertrack. It shows what you still need, grouped by recipe like the quest list, and its title bar only shows when you point at it. Stretch it from any edge, right-click it to fade it, or pick a background shade (None, Light, Medium, Dark). Click x on a recipe to take it off the tracker; it stays on your shopping list, and Track all brings it back. It remembers its place and size.
 
 ## Installation
 

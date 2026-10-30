@@ -1,5 +1,6 @@
--- Crafters Ledger v3.2.17. Legacy ShoppingCart commands and save file remain compatible.
-ShoppingCart = {items={},projects={},sources={},amounts={}}
+-- Crafters Ledger v3.3.0. Legacy ShoppingCart commands and save file remain compatible.
+ShoppingCart = {items={},projects={},sources={},amounts={},countInv=true,countAcct=false,
+    tracker={shown=false,shade=25,x=nil,y=nil,w=nil,h=nil},untracked={}}
 MarketBasket = ShoppingCart
 CraftersLedger = ShoppingCart
 local C=ShoppingCart
@@ -36,6 +37,13 @@ function C.save()
                 end
             end
         end
+        -- which places Have counts: the Inventory and Account checkboxes
+        f:write('@counts\t',C.countInv and '1' or '0','\t',C.countAcct and '1' or '0','\n')
+        local t=C.tracker
+        f:write('@tracker\t',t.shown and '1' or '0','\t',tostring(t.shade),'\t',tostring(t.x or ''),'\t',tostring(t.y or ''),
+            '\t',tostring(t.w or ''),'\t',tostring(t.h or ''),'\n')
+        -- recipes taken off the tracker (still on the shopping list)
+        for title in pairs(C.untracked) do f:write('@untrack\t',title,'\n') end
         f:close()
     end)
     if not ok then say('Save failed: '..tostring(err)); return false end
@@ -87,7 +95,7 @@ function C.removeRecipe(title)
             end
         end
     end
-    C.projects[title]=nil
+    C.projects[title]=nil; C.untracked[title]=nil
     C.save()
     say('Removed recipe: '..title)
     return removed,kept
@@ -140,6 +148,22 @@ local function loadCart()
         elseif line:sub(1,8)=='@source\t' then
             local name,title=line:match('^@source\t([^\t]+)\t([^\t]+)$')
             if valid(name) and valid(title) then C.sources[name]=C.sources[name] or {}; C.sources[name][title]=true end
+        elseif line:sub(1,9)=='@tracker\t' then
+            local shown,shade,x,y,rest=line:match('^@tracker\t([01])\t(%d+)\t(%-?%d*)\t(%-?%d*)(.*)$')
+            if shown then
+                local w,h=tostring(rest):match('^\t(%d*)\t(%d*)$')
+                C.tracker={shown=shown=='1',shade=math.min(90,tonumber(shade) or 25),x=tonumber(x),y=tonumber(y),
+                    w=tonumber(w),h=tonumber(h)}
+            end
+        elseif line:sub(1,9)=='@untrack\t' then
+            local title=line:match('^@untrack\t([^\t]+)$')
+            if valid(title) then C.untracked[title]=true end
+        elseif line:sub(1,8)=='@counts\t' then
+            local inv,acct=line:match('^@counts\t([01])\t([01])$')
+            if inv then
+                C.countInv=inv=='1'; C.countAcct=acct=='1'
+                if not C.countInv and not C.countAcct then C.countInv=true end
+            end
         elseif line:sub(1,8)=='@amount\t' then
             local name,title,n=line:match('^@amount\t([^\t]+)\t([^\t]+)\t(%d+)$')
             n=tonumber(n)
@@ -204,7 +228,159 @@ local function counts()
     end
     return result
 end
+
+-- Account-wide counts (Lua API 55+). ShroudSearchOwnedItems takes an exact item name and answers a few
+-- frames later through a function: total, totals by place (carried, bank, houseStorage, otherCharacters,
+-- mail, crafting, vendorListings, ransom, unknown) and a row per place/container. A few lookups run at
+-- once; answers are kept for a minute. The callback only stores data; the UI reads it on update.
+local clockNow=0
+local owned={}           -- lower name -> {at,name,total,carried,account,rows,missing,truncated}
+local ownedWant,ownedQueued,inflight={},{},{}
+local ownedVersion=0     -- goes up with every answer, so pages know to redraw
+local OWNED_MAX,OWNED_TIMEOUT,OWNED_AGE=8,4,300
+local PLACE_NAMES={carried='Bag',bank='Bank',houseStorage='House',otherCharacters='Other character',
+    mail='Mail',crafting='Crafting',vendorListings='Vendor',ransom='Ransom',unknown='Other'}
+local function canCountAccount() return type(ShroudSearchOwnedItems)=='function' end
+local function wantOwned(name,front)
+    if not canCountAccount() or not valid(name) then return end
+    local k=string.lower(name)
+    if inflight[k] then return end
+    local o=owned[k]
+    if o and clockNow-o.at<OWNED_AGE then return end
+    if ownedQueued[k] then
+        if not front then return end
+        for i,n in ipairs(ownedWant) do if string.lower(n)==k then table.remove(ownedWant,i); break end end
+    end
+    ownedQueued[k]=true
+    if front then table.insert(ownedWant,1,name) else ownedWant[#ownedWant+1]=name end
+end
+local function storeOwned(asked,res)
+    local k=string.lower(asked)
+    inflight[k]=nil
+    ownedVersion=ownedVersion+1
+    if type(res)~='table' then owned[k]={at=clockNow,name=asked,missing=true,total=0,carried=0,account=0,rows={}}; return end
+    local totals=field(res,'totals')
+    local carried=tonumber(type(totals)=='table' and field(totals,'carried')) or 0
+    local total=tonumber(field(res,'total')) or 0
+    local rows={}
+    for _,r in ipairs(list(field(res,'rows'))) do
+        if type(r)=='table' then
+            rows[#rows+1]={place=tostring(field(r,'place') or 'unknown'),location=field(r,'location'),
+                container=field(r,'container'),quantity=tonumber(field(r,'quantity')) or 0}
+        end
+    end
+    owned[k]={at=clockNow,name=field(res,'name') or asked,total=total,carried=carried,
+        account=math.max(0,total-carried),rows=rows,truncated=field(res,'truncated')==true,
+        missing=field(res,'ok')==false}
+end
+local function pumpOwned()
+    if not canCountAccount() then return end
+    local busy=0
+    for k,t0 in pairs(inflight) do
+        if clockNow-t0>OWNED_TIMEOUT then
+            -- no answer: usually not an exact item name. Count it as none and try again later.
+            inflight[k]=nil; ownedVersion=ownedVersion+1
+            owned[k]={at=clockNow,name=k,missing=true,total=0,carried=0,account=0,rows={}}
+        else busy=busy+1 end
+    end
+    while busy<OWNED_MAX and #ownedWant>0 do
+        local name=table.remove(ownedWant,1)
+        local k=string.lower(name)
+        ownedQueued[k]=nil; inflight[k]=clockNow; busy=busy+1
+        local ok=pcall(ShroudSearchOwnedItems,name,function(res) storeOwned(name,res) end)
+        if not ok then storeOwned(name,nil) end
+    end
+end
+local function forgetOwned()
+    -- mark everything out of date but keep showing the old numbers until the new ones arrive
+    for _,o in pairs(owned) do o.at=-math.huge end
+end
+-- Quick count (Lua API 55): ShroudGetOwnedCounts answers at once but only knows your bag and bank,
+-- not house chests or other characters. Shown while the full search is on its way. A few per frame.
+local quick={}               -- lower name -> {at,carried,account} (bag and bank only)
+local quickLeft=0            -- quick lookups still allowed this frame
+local QUICK_PER_FRAME=12
+local function quickCount(name)
+    local k=string.lower(name)
+    local q=quick[k]
+    if q and clockNow-q.at<30 then return q end
+    if type(ShroudGetOwnedCounts)~='function' or quickLeft<=0 then return q end
+    quickLeft=quickLeft-1
+    local ok,r=pcall(ShroudGetOwnedCounts,name)
+    if ok and type(r)=='table' then
+        local carried=tonumber(field(r,'carried')) or 0
+        local total=tonumber(field(r,'total')) or carried
+        q={at=clockNow,carried=carried,account=math.max(0,total-carried)}
+    else q={at=clockNow,carried=0,account=0} end
+    quick[k]=q
+    return q
+end
+-- Saved counts: the last full account counts are written to a file when you reload or log out, and
+-- read back at login, so the numbers show straight away while fresh ones are fetched.
+local countsFile=type(ShroudLuaPath)=='string' and (ShroudLuaPath..'/CraftersLedger-counts.tsv') or nil
+local function saveCounts()
+    if not countsFile or type(io)~='table' or type(io.open)~='function' then return end
+    pcall(function()
+        local f=io.open(countsFile,'w'); if not f then return end
+        for k,o in pairs(owned) do
+            if not o.missing and valid(o.name) then
+                f:write('@item\t',o.name,'\t',tostring(o.total),'\t',tostring(o.carried),'\n')
+                for _,r in ipairs(o.rows or {}) do
+                    f:write('@row\t',o.name,'\t',tostring(r.place),'\t',(tostring(r.location or '')):gsub('[\t\r\n]',' '),'\t',
+                        (tostring(r.container or '')):gsub('[\t\r\n]',' '),'\t',tostring(r.quantity),'\n')
+                end
+            end
+        end
+        f:close()
+    end)
+end
+local function loadCounts()
+    if not countsFile or type(io)~='table' or type(io.open)~='function' then return end
+    pcall(function()
+        local f=io.open(countsFile,'r'); if not f then return end
+        for line in f:lines() do
+            local name,total,carried=line:match('^@item\t([^\t]+)\t(%d+)\t(%d+)$')
+            if name then
+                -- out of date on purpose: shown now, fetched again soon
+                owned[string.lower(name)]={at=-math.huge,name=name,total=tonumber(total),carried=tonumber(carried),
+                    account=math.max(0,tonumber(total)-tonumber(carried)),rows={},saved=true}
+            else
+                local n,place,loc,box,q=line:match('^@row\t([^\t]+)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t(%d+)$')
+                local o=n and owned[string.lower(n)]
+                if o then o.rows[#o.rows+1]={place=place,location=loc~='' and loc or nil,container=box~='' and box or nil,quantity=tonumber(q)} end
+            end
+        end
+        f:close()
+    end)
+end
+loadCounts()
+-- How many of an item the checked places hold. nil while an account count is still on its way.
+-- inv is counts(): what this character carries, read straight from the bag.
+local function haveOf(name,inv)
+    local k=string.lower(name)
+    local bag=inv and (inv[k] or 0)
+    if not C.countAcct or not canCountAccount() then return bag end
+    wantOwned(name)
+    local o=owned[k]
+    local acct=o and o.account
+    if not o then
+        -- full search still on its way: bag and bank for now
+        local q=quickCount(name)
+        if not q then return nil end
+        acct=q.account
+    end
+    if not C.countInv then return acct end
+    return (bag or (o and o.carried) or 0)+acct
+end
+local function countingText()
+    if C.countAcct and canCountAccount() then
+        return C.countInv and 'Counting your bag and account (bank, house, other characters)'
+            or 'Counting your account only (bank, house, other characters), not your bag'
+    end
+    return 'Counting your bag only'
+end
 local refreshCart,preview,findRecipes
+local trackerToggleRequested=false
 local cartStructure=nil
 local cartCells={}
 local projectSignature=nil
@@ -225,7 +401,7 @@ refreshCart=function()
     local total,ready,units=0,0,0
     for name,target in pairs(C.items) do
         total=total+1
-        local n=have and (have[string.lower(name)] or 0)
+        local n=haveOf(name,have)
         local missing=n and math.max(0,target-n)
         if missing==0 then ready=ready+1 end
         units=units+(missing or 0)
@@ -241,7 +417,7 @@ refreshCart=function()
             end
         end
     end
-    local summary=have and (ready..' of '..total..' materials ready | '..units..' units still to get')
+    local summary=(have or C.countAcct) and (ready..' of '..total..' materials ready | '..units..' units still to get')
         or (total..' materials | Inventory unavailable')
     if el.summary and refreshSummary~=summary then el.summary:SetText(summary); refreshSummary=summary end
     local titles={}; for title in pairs(groups) do titles[#titles+1]=title end; table.sort(titles)
@@ -320,8 +496,8 @@ refreshCart=function()
     end
     for _,cell in ipairs(cartCells) do
         local target=C.items[cell.name]
-        local n=have and (have[string.lower(cell.name)] or 0)
-        local text=n and tostring(n) or '?'
+        local n=haveOf(cell.name,have)
+        local text=n and tostring(n) or (C.countAcct and '...' or '?')
         local missing=n and target and math.max(0,target-n)
         local status=missing and tostring(missing) or '?'
         local color=missing==0 and '@green' or '@red'
@@ -356,8 +532,10 @@ local function recipeRows()
     if #rows==0 then return nil,'No required ingredients returned for this recipe.' end
     return rows
 end
+local previewPending,previewVersion=false,0
 preview=function()
     if not el.preview then return end
+    previewPending=false; previewVersion=ownedVersion
     el.preview:Clear()
     if not selected then el.preview:Add(label('Search your recipes and select one to see its materials.')); return end
     local n=number(el.crafts:GetText()) or 1
@@ -397,7 +575,10 @@ preview=function()
         else children[#children+1]=flexLabel(tostring(field(ing,'name') or 'Unnamed ingredient')..suffix) end
         local needed=qty and qty*(tool and 1 or n)
         children[#children+1]=label('Need '..tostring(needed or '?'),85)
-        children[#children+1]=label('Have '..(have[string.lower(tostring(field(item,'name') or ''))] or 0),80)
+        local itemName=tostring(field(item,'name') or '')
+        local h=valid(itemName) and haveOf(itemName,have) or 0
+        if h==nil then previewPending=true end
+        children[#children+1]=label('Have '..(h or '...'),80)
         el.preview:Add(row(children))
     end
 end
@@ -437,17 +618,18 @@ renderMatches=function()
     if #matches==0 then el.matches:Add(label('No matching recipes. Search another name or use a material list.')) end
     el.matchPage:SetText(#matches..' recipes - page '..recipePage..' / '..pages)
 end
+local quietRead=false
 local function readRecipes()
     local ok,book=false,nil
     if type(ShroudGetKnownRecipes)=='function' then ok,book=pcall(ShroudGetKnownRecipes) end
     if not ok or type(book)~='table' or next(book)==nil then
         ok,book=pcall(ShroudGetRecipeBook)
     end
-    if not ok or type(book)~='table' then msg('Could not read your recipe book.'); return end
-    recipes={}; detailCache={}
+    if not ok or type(book)~='table' then if not quietRead then msg('Could not read your recipe book.') end; return end
+    recipes={}; detailCache={}; itemIndex=nil; indexJob=nil
     for _,r in pairs(book) do if type(field(r,'name'))=='string' then recipes[#recipes+1]=r end end
     table.sort(recipes,function(a,b) return field(a,'name')<field(b,'name') end)
-    msg('Read '..#recipes..' recipes. Search by part of the name.')
+    if not quietRead then msg('Read '..#recipes..' recipes. Search by part of the name.') end
 end
 findRecipes=function()
     if #recipes==0 then readRecipes() end
@@ -488,6 +670,7 @@ local function addRecipe(linkOnly)
         if quantity then results[#results+1]=(quantity*total)..' x '..tostring(field(r,'name')) end
     end
     C.projects[title]={crafts=total,output=table.concat(results,', '):gsub('[\t\r\n]',' ')}
+    C.untracked[title]=nil
     local saved=C.save(); refreshCart()
     if navigate then navigate('Shopping list') end
     msg((linkOnly==true and 'Labeled existing materials for ' or 'Added materials for ')..title..
@@ -515,6 +698,453 @@ local function importList()
     if navigate then navigate('Shopping list') end
     msg('Material list added.'..(saved and ' Cart saved.' or ' Saving failed; see chat.'))
 end
+
+-- Find items: every item your known recipes make or use, plus your shopping list, searchable by part
+-- of its name. Built in small timed steps (the game stops an add-on that takes too long in one frame).
+local itemIndex=nil          -- lower name -> {name,makes={recipe=true},uses={recipe=true}}
+local indexJob=nil
+local itemMatches,itemPage,itemCells={},1,{}
+local itemQuery=''
+local itemOpen={}            -- lower name -> its places are showing
+local placeOpen={}           -- lower name..'|'..place key -> that place's containers are showing
+local renderItems,refreshItems
+local ITEM_PAGE=8
+local STEP_SECONDS=0.004     -- time spent per frame building the item list
+local function clock()
+    if type(os)=='table' and type(os.clock)=='function' then
+        local ok,v=pcall(os.clock); if ok and type(v)=='number' then return v end
+    end
+end
+local function indexAdd(items,name,kind,title)
+    if not valid(name) then return end
+    local k=string.lower(name)
+    local it=items[k]
+    if not it then it={name=name,makes={},uses={}}; items[k]=it end
+    if kind then it[kind][title]=true end
+end
+local function startIndex(quiet)
+    if indexJob then return true end
+    if #recipes==0 then quietRead=quiet==true; readRecipes(); quietRead=false end
+    if #recipes==0 then return false end      -- recipe book not ready yet: try again later
+    indexJob={list=recipes,i=1,items={}}
+    if el.itemStatus then el.itemStatus:SetText('Building the item list from '..#recipes..' recipes...') end
+    return true
+end
+local function indexStep()
+    local j=indexJob
+    local start,done=clock(),0
+    while j.i<=#j.list do
+        local r=j.list[j.i]; j.i=j.i+1; done=done+1
+        local d=detail(r)
+        local title=tostring(field(d,'name') or field(r,'name') or '?')
+        for _,res in ipairs(list(field(d,'results'))) do indexAdd(j.items,field(res,'name'),'makes',title) end
+        for _,ing in ipairs(list(field(d,'ingredients'))) do
+            local choices=list(field(ing,'choices'))
+            if field(ing,'group')~=true then indexAdd(j.items,field(ing,'name'),'uses',title) end
+            for _,c in ipairs(choices) do indexAdd(j.items,field(c,'name'),'uses',title) end
+        end
+        local t=clock()
+        if (start and t and t-start>=STEP_SECONDS) or (not (start and t) and done>=20) then return false end
+    end
+    itemIndex=j.items; indexJob=nil
+    return true
+end
+local function titlesOf(set)
+    local out={}; for title in pairs(set or {}) do out[#out+1]=title end
+    table.sort(out); return out
+end
+local function shortList(names,max)
+    if #names==0 then return 'none' end
+    local shown={}
+    for i=1,math.min(#names,max) do shown[i]=names[i] end
+    return table.concat(shown,', ')..(#names>max and (' and '..(#names-max)..' more') or '')
+end
+local function findItems()
+    if not el.itemResults then return end
+    itemQuery=string.lower(trim(el.itemSearch:GetText()))
+    itemPage=1
+    if not itemIndex then startIndex(); itemMatches={}; renderItems(); return end
+    local found={}
+    local seen={}
+    -- every word has to be in the name, in any order, like the game's Search All My Stuff
+    local words={}
+    for w in itemQuery:gmatch('%S+') do words[#words+1]=w end
+    local function matches(k)
+        for _,w in ipairs(words) do if not string.find(k,w,1,true) then return false end end
+        return true
+    end
+    local function consider(name,entry)
+        if not valid(name) then return end
+        local k=string.lower(name)
+        if seen[k] then return end
+        if matches(k) then
+            seen[k]=true
+            found[#found+1]={name=entry and entry.name or name,entry=entry or itemIndex[k]}
+        end
+    end
+    if itemQuery=='' then
+        -- nothing typed: nothing listed
+    else
+        for _,entry in pairs(itemIndex) do consider(entry.name,entry) end
+        for name in pairs(C.items) do consider(name,nil) end
+        -- everything in your bag, even items no recipe uses
+        local ok,bag=pcall(ShroudGetInventoryItems)
+        if ok and type(bag)=='table' then
+            for _,item in pairs(bag) do consider(field(item,'name'),nil) end
+        end
+        -- items the game has already counted for you
+        for _,o in pairs(owned) do if not o.missing and type(o.name)=='string' then consider(o.name,nil) end end
+    end
+    if el.itemStatus then
+        local n=0; for _ in pairs(itemIndex) do n=n+1 end
+        el.itemStatus:SetText(itemQuery=='' and ('Type a name or words from it to search all '..n..' items.')
+            or ('Searched '..n..' items, your bag and your shopping list. For anything else, type its full name.'))
+    end
+    -- exact name first, then names starting with the word, then the rest A-Z
+    local function rank(f)
+        local k=string.lower(f.name)
+        if k==itemQuery then return 0 elseif k:sub(1,#itemQuery)==itemQuery then return 1 end
+        return 2
+    end
+    table.sort(found,function(a,b)
+        local ra,rb=rank(a),rank(b)
+        if ra~=rb then return ra<rb end
+        return a.name<b.name
+    end)
+    -- a typed exact name nobody's recipes mention can still be looked up
+    if itemQuery~='' and #found==0 and valid(trim(el.itemSearch:GetText())) then
+        found[1]={name=trim(el.itemSearch:GetText()),entry=nil,typed=true}
+    end
+    itemMatches=found
+    renderItems()
+end
+-- Where an item is, grouped by place: your bag, a bank, each house lot, other characters, mail...
+-- Each place has its own total and the containers in it. Only the ticked places count.
+local function wherePlaces(o)
+    local places,order={},{}
+    for _,r in ipairs(o.rows or {}) do
+        local isBag=r.place=='carried'
+        if (isBag and C.countInv) or (not isBag and C.countAcct) then
+            local loc=tostring(r.location or PLACE_NAMES[r.place] or r.place):gsub('%s*%(in a container%)','')
+            local key=r.place..'|'..loc
+            local p=places[key]
+            if not p then
+                p={key=key,label=loc,place=r.place,total=0,boxes={},boxOrder={}}
+                places[key]=p; order[#order+1]=p
+            end
+            p.total=p.total+r.quantity
+            local box=(r.container and r.container~='') and tostring(r.container) or 'Not in a container'
+            if not p.boxes[box] then p.boxes[box]=0; p.boxOrder[#p.boxOrder+1]=box end
+            p.boxes[box]=p.boxes[box]+r.quantity
+        end
+    end
+    -- bag first, then bank, house and the rest; biggest first within each
+    local rankOf={carried=1,bank=2,houseStorage=3,otherCharacters=4}
+    table.sort(order,function(a,b)
+        local ra,rb=rankOf[a.place] or 9,rankOf[b.place] or 9
+        if ra~=rb then return ra<rb end
+        return a.total>b.total
+    end)
+    return order
+end
+local function fillWhere(cell)
+    cell.where:Clear()
+    local k=string.lower(cell.name)
+    local o=owned[k]
+    if C.countAcct and not o then cell.where:Add(label('Counting...')); return end
+    if not C.countAcct then
+        -- bag only: the bag's count is all there is to show
+        local inv=counts()
+        cell.where:Add(row{label('Bag',nil),UI.Label{text='',style={flexGrow=1}},label(tostring(inv and (inv[k] or 0) or '?'),70)})
+        cell.where:Add(label('Tick Account at the top to see the bank, house chests and other characters.'))
+        return
+    end
+    if o.missing then cell.where:Add(label('The game found none. Check the exact item name.')); return end
+    local places=wherePlaces(o)
+    if #places==0 then cell.where:Add(label('None in the places you are counting.')) end
+    for _,p in ipairs(places) do
+        local pk=k..'|'..p.key
+        local inside=UI.Column{visible=placeOpen[pk]==true,style={paddingLeft=40,flexShrink=0}}
+        for _,box in ipairs(p.boxOrder) do
+            inside:Add(row{flexLabel(box),label(tostring(p.boxes[box]),70)})
+        end
+        local header={}
+        if #p.boxOrder>1 or p.boxOrder[1]~='Not in a container' then
+            local toggle
+            toggle=UI.Button{text=placeOpen[pk] and '-' or '+',style={width=32},
+                tooltip='Show the containers here',onClick=function()
+                    placeOpen[pk]=not placeOpen[pk]
+                    inside:SetVisible(placeOpen[pk]); toggle:SetText(placeOpen[pk] and '-' or '+')
+                end}
+            header[1]=toggle
+        else
+            header[1]=UI.Label{text='',style={width=32,flexShrink=0}}
+        end
+        -- the game's location already starts with "Inventory:" or "Bank:"; say it once
+        local where=p.label:gsub('^Inventory:%s*',''):gsub('^Bank:%s*','')
+        header[#header+1]=flexLabel((PLACE_NAMES[p.place] or p.place)..': '..where)
+        header[#header+1]=label(tostring(p.total),70)
+        cell.where:Add(row(header))
+        cell.where:Add(inside)
+    end
+    if #places>1 then
+        cell.where:Add(row{UI.Label{text='',style={width=32,flexShrink=0}},flexLabel('Total'),label(tostring(haveOf(cell.name,counts()) or '...'),70)})
+    end
+    if o.truncated then cell.where:Add(label('The game cut this list short; totals are still complete.')) end
+end
+renderItems=function()
+    if not el.itemResults then return end
+    el.itemResults:Clear(); itemCells={}
+    local pages=math.max(1,math.ceil(#itemMatches/ITEM_PAGE))
+    itemPage=math.min(itemPage,pages)
+    if indexJob then
+        el.itemResults:Add(label('Building the item list ('..(indexJob.i-1)..' of '..#indexJob.list..
+            ' recipes). Results show when it finishes.'))
+    elseif #itemMatches==0 and not (itemIndex and itemQuery=='') then
+        el.itemResults:Add(label(not itemIndex and 'Type part of an item name and press Enter or Find.'
+            or 'No items match. Try part of the name, like garnet or potato.'))
+    end
+    for i=(itemPage-1)*ITEM_PAGE+1,math.min(itemPage*ITEM_PAGE,#itemMatches) do
+        local m=itemMatches[i]
+        local name=m.name
+        local k=string.lower(name)
+        wantOwned(name,true)
+        local have=label('',260)
+        local where=UI.Column{visible=itemOpen[k]==true,style={paddingLeft=34,paddingTop=4,flexShrink=0}}
+        local cell={name=name,have=have,where=where,version=-1}
+        itemCells[#itemCells+1]=cell
+        local whereButton
+        whereButton=UI.Button{text=itemOpen[k] and '-' or '+',style={width=32},
+            tooltip='Show where it is: your bag, bank and house chests, each with its own total',onClick=function()
+                itemOpen[k]=not itemOpen[k]
+                where:SetVisible(itemOpen[k]); whereButton:SetText(itemOpen[k] and '-' or '+')
+                fillWhere(cell); cell.version=ownedVersion
+            end}
+        local add=UI.Button{text='Add',style={width=55},tooltip='Add the amount above to what your shopping list needs',
+            onClick=function()
+                local n=number(el.itemAmount:GetText())
+                if not n then msg('Amount must be a whole number, 1 or more.'); return end
+                C.add(name,n); refreshCart(); refreshItems()
+                local have=haveOf(name,counts())
+                msg('Added '..n..' '..name..'. You need '..C.items[name]..(have and
+                    (', have '..have..', so '..math.max(0,C.items[name]-have)..' still to get.') or '.'))
+            end}
+        local about
+        if m.entry then
+            local makes,uses=titlesOf(m.entry.makes),titlesOf(m.entry.uses)
+            about='Made by: '..shortList(makes,2)..' | Used in '..#uses..(#uses==1 and ' recipe' or ' recipes')
+                ..(#uses>0 and (': '..shortList(uses,3)) or '')
+        elseif m.typed then about='Not in your recipes or bag. Looking it up by exact name.'
+        elseif C.items[name] then about='On your shopping list'
+        else about='Not used in your recipes' end
+        el.itemResults:Add(UI.Column{style={paddingTop=6,paddingBottom=6,flexShrink=0},children={
+            row{whereButton,UI.Label{text=name,class='heading',style={flexGrow=1,flexShrink=1,whiteSpace='wrap',fontSize=15}},
+                have,add},
+            label(about),
+            where,
+        }})
+        if itemOpen[k] then fillWhere(cell); cell.version=ownedVersion end
+    end
+    el.itemPage:SetText(#itemMatches==0 and '' or ('Page '..itemPage..' / '..pages..' - '..#itemMatches..' items'))
+    refreshItems()
+end
+refreshItems=function()
+    if not el.itemResults then return end
+    local inv=counts()
+    for _,cell in ipairs(itemCells) do
+        local n=haveOf(cell.name,inv)
+        local need=C.items[cell.name]
+        local text
+        if n==nil then text='Have ...'
+        else
+            text='Have '..n
+            local o=owned[string.lower(cell.name)]
+            if C.countAcct and C.countInv and o and inv then
+                text=text..' (bag '..(inv[string.lower(cell.name)] or 0)..')'
+            end
+        end
+        -- on the shopping list: what the list needs and what is still to get
+        local color='@text'
+        if need then
+            local get=n and math.max(0,need-n)
+            text=text..' | Need '..need..' | '..(get==nil and 'To get ...' or (get==0 and 'Ready' or ('To get '..get)))
+            color=get==0 and '@green' or (get and '@red' or '@text')
+        end
+        if cell.lastText~=text then cell.have:SetText(text); cell.lastText=text end
+        if cell.lastColor~=color then pcall(function() cell.have:SetStyle{color=color} end); cell.lastColor=color end
+        if itemOpen[string.lower(cell.name)] and cell.version~=ownedVersion then
+            fillWhere(cell); cell.version=ownedVersion
+        end
+    end
+end
+
+-- The tracker: the shopping list on screen like the game's quest list. A compact window (Lua API 19):
+-- its title bar only shows while the pointer is over it, so it reads like a see-through list, but it
+-- can be stretched from any edge and faded like any window (right-click it for opacity). Recipe names
+-- are headings with what you still need under them; X takes a recipe off the tracker (it stays on the
+-- shopping list), like untracking a quest. Built again only when the lines change; counts update in place.
+local tracker=nil            -- {win,box,lines={name->label},signature,visible}
+local TRACK_MAX_ROWS=60      -- headings + materials shown; past that a "more" line (element limits)
+local SHADES={['None']=0,['Light']=25,['Medium']=45,['Dark']=65}
+local SHADE_NAMES={'None','Light','Medium','Dark'}
+local function shadeColor(pct)
+    if pct<=0 then return '#00000000' end
+    return string.format('#000000%02x',math.floor(math.min(pct,100)*255/100+0.5))
+end
+local function shadeName(pct)
+    local best,gap='Light',999
+    for name,v in pairs(SHADES) do if math.abs(v-pct)<gap then best,gap=name,math.abs(v-pct) end end
+    return best
+end
+local function trackerGroups()
+    local inv=counts()
+    local groups,order={},{}
+    local total,left,hidden=0,0,0
+    for name,target in pairs(C.items) do
+        total=total+1
+        local n=haveOf(name,inv)
+        local missing=n and math.max(0,target-n)
+        if missing==nil or missing>0 then
+            left=left+1
+            local titles={}
+            for title in pairs(C.sources[name] or {}) do titles[#titles+1]=title end
+            if #titles==0 then titles={'Other materials'} end
+            for _,title in ipairs(titles) do
+                if C.untracked[title] then hidden=hidden+1
+                else
+                    if not groups[title] then groups[title]={}; order[#order+1]=title end
+                    groups[title][#groups[title]+1]={name=name,have=n,need=target}
+                end
+            end
+        end
+    end
+    table.sort(order,function(a,b)
+        if a=='Other materials' then return false elseif b=='Other materials' then return true end
+        return a<b
+    end)
+    for _,title in ipairs(order) do table.sort(groups[title],function(a,b) return a.name<b.name end) end
+    return groups,order,total,left,hidden
+end
+local function trackerShown() return tracker~=nil and tracker.visible end
+local function saveTrackerPlace()
+    if not tracker then return end
+    local changed=false
+    local ok,x,y=pcall(function() return tracker.win:GetPosition() end)
+    if ok and tonumber(x) and tonumber(y) and (math.floor(x)~=C.tracker.x or math.floor(y)~=C.tracker.y) then
+        C.tracker.x,C.tracker.y=math.floor(x),math.floor(y); changed=true
+    end
+    local ok2,w,h=pcall(function() return tracker.win:GetSize() end)
+    if ok2 and tonumber(w) and tonumber(h) and (math.floor(w)~=C.tracker.w or math.floor(h)~=C.tracker.h) then
+        C.tracker.w,C.tracker.h=math.floor(w),math.floor(h); changed=true
+    end
+    if changed then C.save() end
+end
+local saveTrackerPosition=saveTrackerPlace
+local untrackRecipe
+local function itemText(m) return m.name..'  '..(m.have and tostring(m.have) or '...')..' / '..m.need end
+local function fillTracker(groups,order,total,left,hidden)
+    local box=tracker.box
+    box:Clear(); tracker.lines={}
+    local rows=0
+    if total==0 then box:Add(UI.Label{text='Shopping list is empty',style={fontSize=13,whiteSpace='wrap'}})
+    elseif left==0 then box:Add(UI.Label{text='Everything on the list is ready',style={fontSize=13,color='@green'}}) end
+    for _,title in ipairs(order) do
+        if rows>=TRACK_MAX_ROWS then break end
+        local project=C.projects[title]
+        box:Add(UI.Row{style={alignItems='center',marginTop=4,flexShrink=0},children={
+            UI.Label{text=title..(project and (' x'..project.crafts) or ''),
+                style={flexGrow=1,flexShrink=1,whiteSpace='wrap',fontSize=14,color='@gold'}},
+            UI.Button{text='x',style={width=24,height=22,fontSize=12},
+                tooltip='Take '..title..' off the tracker (it stays on your shopping list)',
+                onClick=function() untrackRecipe(title) end}}})
+        rows=rows+1
+        for _,m in ipairs(groups[title]) do
+            if rows>=TRACK_MAX_ROWS then break end
+            local e=UI.Label{text=itemText(m),style={fontSize=13,whiteSpace='wrap',paddingLeft=14,flexShrink=0}}
+            tracker.lines[#tracker.lines+1]={el=e,name=m.name,title=title,text=itemText(m)}
+            box:Add(e); rows=rows+1
+        end
+    end
+    local more=0
+    for _,title in ipairs(order) do more=more+1+#groups[title] end
+    if more>rows then box:Add(UI.Label{text='...and more. Open /ledger to see everything.',style={fontSize=12}}) end
+    if hidden>0 then
+        box:Add(UI.Label{text=hidden..' hidden from the tracker. Shopping list > Track all to bring them back.',
+            style={fontSize=11,whiteSpace='wrap',marginTop=6}})
+    end
+end
+local function refreshTracker()
+    if not trackerShown() then return end
+    local groups,order,total,left,hidden=trackerGroups()
+    local parts={tostring(total==0),tostring(left==0),tostring(hidden)}
+    for _,title in ipairs(order) do
+        local project=C.projects[title]
+        parts[#parts+1]=title..'|'..(project and project.crafts or '')
+        for _,m in ipairs(groups[title]) do parts[#parts+1]=m.name end
+    end
+    local signature=table.concat(parts,'\n')
+    if signature~=tracker.signature then
+        tracker.signature=signature
+        fillTracker(groups,order,total,left,hidden)
+        return
+    end
+    -- same lines: only the counts change
+    local byKey={}
+    for _,title in ipairs(order) do for _,m in ipairs(groups[title]) do byKey[title..'\t'..m.name]=m end end
+    for _,l in ipairs(tracker.lines) do
+        local m=byKey[l.title..'\t'..l.name]
+        if m then
+            local text=itemText(m)
+            if text~=l.text then l.el:SetText(text); l.text=text end
+        end
+    end
+end
+local function buildTracker()
+    local t=C.tracker
+    local box=UI.Column{style={paddingLeft=8,paddingRight=8,paddingTop=2,paddingBottom=6,flexShrink=0,
+        backgroundColor=shadeColor(t.shade),borderRadius=3}}
+    local win2=UI.Window{id='crafters_ledger_tracker_win',title='Shopping list',compact=true,
+        width=t.w or 300,height=t.h or 320,minWidth=170,minHeight=80,
+        x=t.x or 1480,y=t.y or 240,escCloses=false,
+        onClose=function()
+            if tracker then tracker.visible=false end
+            C.tracker.shown=false; C.save()
+        end,
+        style={paddingTop=2,paddingBottom=2},
+        children={UI.Scroll{id='ledger_tracker_scroll',style={flexGrow=1},children={box}}}}
+    tracker={win=win2,box=box,lines={},signature=nil,visible=true}
+end
+local function setTracker(show)
+    C.tracker.shown=show==true
+    if show then
+        if not tracker then
+            local ok,err=pcall(buildTracker)
+            if not ok then tracker=nil; C.tracker.shown=false; msg('Tracker unavailable: '..tostring(err)); C.save(); return end
+        end
+        pcall(function() tracker.win:Show() end); tracker.visible=true
+        refreshTracker()
+    elseif tracker then
+        saveTrackerPlace()
+        pcall(function() tracker.win:Hide() end); tracker.visible=false
+    end
+    C.save()
+end
+untrackRecipe=function(title)
+    C.untracked[title]=true; C.save()
+    if tracker then tracker.signature=nil end
+    refreshTracker()
+end
+local function trackAll()
+    C.untracked={}; C.save()
+    if tracker then tracker.signature=nil end
+    refreshTracker()
+    msg('Every recipe on your shopping list is back on the tracker.')
+end
+function C.tracker_toggle() trackerToggleRequested=true end
+local function setShade(pct)
+    C.tracker.shade=pct; C.save()
+    if tracker then pcall(function() tracker.box:SetStyle{backgroundColor=shadeColor(pct)} end) end
+end
 local function buildUI()
     UI=Shroud.UI
     cartStructure=nil; cartCells={}; refreshSummary=nil
@@ -541,7 +1171,16 @@ local function buildUI()
     -- rather than growing the window layout to fit every expanded recipe.
     local shopPage=UI.Column{visible=false,style={height=0,flexGrow=1,flexShrink=1},children={
         el.summary,
-        row{listSearch,viewPicker,UI.Button{text='Refresh counts',onClick=refreshCart}},
+        row{listSearch,viewPicker,UI.Button{text='Refresh counts',onClick=function() forgetOwned(); refreshCart() end}},
+        row{label('On-screen tracker (like the quest list):',255),
+            UI.Button{text='Show / hide',tooltip='See-through list of what you still need. Drag it by its grip.',
+                onClick=function() setTracker(not trackerShown()) end},
+            UI.Button{text='Track all',tooltip='Bring back recipes you took off the tracker with its x',
+                onClick=function() trackAll() end},
+            label('Background',85),
+            UI.Dropdown{choices=SHADE_NAMES,value=shadeName(C.tracker.shade),style={width=120},
+                onChange=function(_,v) setShade(SHADES[v] or 25) end}},
+        label('Stretch the tracker from any edge. Right-click it to fade it. Its x takes a recipe off the tracker only.'),
         label('Click + to see materials, - to hide them. Shared materials show combined shopping-list totals.'),
         UI.Scroll{id='ledger_shopping_scroll',style={height=0,flexGrow=1,flexShrink=1},children={el.cart}},
         row{UI.Button{text='Previous',onClick=function() page=math.max(1,page-1); refreshCart() end},el.cartPage,
@@ -576,7 +1215,20 @@ local function buildUI()
         el.materials,UI.Button{text='Add pasted materials',onClick=importList},
         UI.Label{text='',style={flexGrow=1}},
     }}
-    local pages={['Shopping list']=shopPage,Recipes=recipesPage,['Add materials']=manualPage}
+    el.itemSearch=UI.TextField{text='',placeholder='Item name or words from it, e.g. black pearl',style={flexGrow=1},onSubmit=findItems}
+    el.itemAmount=UI.TextField{text='1',maxLength=7,style={width=70}}
+    el.itemResults=UI.Column{style={flexShrink=0,paddingRight=18}}
+    el.itemPage=label('')
+    el.itemStatus=label('Searches every item your recipes make or use, your bag and your shopping list. For anything else, type its full name.')
+    itemCells={}
+    local itemsPage=UI.Column{visible=false,style={height=0,flexGrow=1,flexShrink=1},children={
+        row{el.itemSearch,UI.Button{text='Find',onClick=findItems},label('Amount to add',110),el.itemAmount},
+        el.itemStatus,
+        UI.Scroll{id='ledger_items_scroll',style={height=0,flexGrow=1,flexShrink=1},children={el.itemResults}},
+        row{UI.Button{text='Previous',onClick=function() itemPage=math.max(1,itemPage-1); renderItems() end},el.itemPage,
+            UI.Button{text='Next',onClick=function() itemPage=itemPage+1; renderItems() end}},
+    }}
+    local pages={['Shopping list']=shopPage,Recipes=recipesPage,['Add materials']=manualPage,['Find items']=itemsPage}
     local activePage='Recipes'
     local navLabel=label('Recipes')
     navigate=function(name)
@@ -584,16 +1236,42 @@ local function buildUI()
         for key,section in pairs(pages) do section:SetVisible(key==name) end
         navLabel:SetText(name)
         if name=='Shopping list' then refreshCart() end
+        if name=='Find items' and not itemIndex then startIndex(); renderItems() end
     end
+    el.counting=label(countingText()..' | Updates automatically | Saved between sessions')
+    local invToggle,acctToggle
+    local function countsChanged(which,value)
+        if which=='inv' then C.countInv=value==true else C.countAcct=value==true end
+        if C.countAcct and not canCountAccount() then
+            C.countAcct=false; pcall(function() acctToggle:SetValue(false) end)
+            msg('This game client cannot count your bank or chests yet (it needs Lua API 55).')
+        end
+        if not C.countInv and not C.countAcct then
+            -- one of them has to count something: put back the one just unticked
+            if which=='inv' then C.countInv=true; pcall(function() invToggle:SetValue(true) end)
+            else C.countAcct=true; pcall(function() acctToggle:SetValue(true) end) end
+            msg('Keep at least one of Inventory or Account ticked.')
+        end
+        C.save()
+        el.counting:SetText(countingText()..' | Updates automatically | Saved between sessions')
+        refreshCart(); renderItems(); if selected then preview() end
+    end
+    invToggle=UI.Toggle{text='Inventory',value=C.countInv,tooltip='Count what this character carries',
+        onChange=function(_,v) countsChanged('inv',v) end}
+    acctToggle=UI.Toggle{text='Account',value=C.countAcct,
+        tooltip='Count your bank, house chests, other characters, mail and vendor listings',
+        onChange=function(_,v) countsChanged('acct',v) end}
     win=UI.Window{id='crafters_ledger_v3',title="Crafters Ledger",width=1000,height=650,
         minWidth=900,minHeight=460,x=70,y=70,escCloses=true,
         style={paddingLeft=16,paddingRight=16,paddingTop=10,paddingBottom=10},children={
             row{UI.Button{text='Recipes',onClick=function() navigate('Recipes') end},
                 UI.Button{text='Shopping list',onClick=function() navigate('Shopping list') end},
-                UI.Button{text='Add materials',onClick=function() navigate('Add materials') end}},
-            navLabel,shopPage,recipesPage,manualPage,
+                UI.Button{text='Add materials',onClick=function() navigate('Add materials') end},
+                UI.Button{text='Find items',onClick=function() navigate('Find items') end},
+                UI.Label{text='',style={flexGrow=1}},label('Count:',55),invToggle,acctToggle},
+            navLabel,shopPage,recipesPage,manualPage,itemsPage,
             el.message,
-            label('Carried inventory only | Updates automatically | Saved between sessions'),
+            el.counting,
         }}
     preview(); refreshCart(); win:Show()
 end
@@ -618,6 +1296,8 @@ function ShroudOnStart()
     end
     if Shroud and Shroud.Command then pcall(Shroud.Command,'basket',function() C.open() end) end
     if Shroud and Shroud.Command then pcall(Shroud.Command,'ledger',function() C.open() end) end
+    if Shroud and Shroud.Command then pcall(Shroud.Command,'ledgertrack',function() C.tracker_toggle() end) end
+    if C.tracker.shown then trackerToggleRequested=true; C.tracker.shown=false end
     if Shroud and Shroud.Keybind then
         local bound,reason=pcall(Shroud.Keybind,{id='toggle',label="Show/hide Crafters Ledger",
             onPress=function() C.toggle() end})
@@ -646,7 +1326,10 @@ function ShroudOnStart()
     end)
     if not ok then say('Cart button unavailable: '..tostring(err)) end
 end
-local elapsed=0
+local elapsed,fastElapsed=0,0
+local saveTimer=0
+local cartVersion,trackVersion=0,0
+local warmAt=3              -- seconds after login: start the item list and account counts in the background
 function ShroudOnUpdate()
     if toggleRequested then
         toggleRequested=false
@@ -655,23 +1338,87 @@ function ShroudOnUpdate()
         end)
         if not ok then say('Could not toggle window: '..tostring(err)) end
     end
+    if trackerToggleRequested then
+        trackerToggleRequested=false
+        if UI==nil and Shroud then UI=Shroud.UI end
+        local ok,err=pcall(function() setTracker(not trackerShown()) end)
+        if not ok then say('Tracker failed: '..tostring(err)) end
+    end
     if openRequested then
         openRequested=false
         local ok,err=pcall(openWindow)
         if not ok then say('Interface could not open: '..tostring(err)) end
     end
-    elapsed=elapsed+(tonumber(ShroudDeltaTime) or 0)
+    local dt=tonumber(ShroudDeltaTime) or 0
+    clockNow=clockNow+dt
+    quickLeft=QUICK_PER_FRAME
+    saveTimer=saveTimer+dt
+    if saveTimer>=120 then saveTimer=0; saveCounts() end
+    local ok2,err2=pcall(function()
+        pumpOwned()
+        if indexJob and indexStep() then
+            findItems()
+        end
+    end)
+    if not ok2 then say('Item search stopped: '..tostring(err2)); indexJob=nil end
+    fastElapsed=fastElapsed+dt
+    if fastElapsed>=0.5 then
+        fastElapsed=0
+        if win then
+            local ok3,err3=pcall(function()
+                if not win:IsShown() then return end
+                refreshItems()
+                if cartVersion~=ownedVersion then cartVersion=ownedVersion; refreshCart() end
+                if indexJob and el.itemResults and #itemCells==0 then renderItems() end
+                if previewPending and previewVersion~=ownedVersion then preview() end
+            end)
+            if not ok3 then say('Refresh failed: '..tostring(err3)) end
+        end
+        if trackerShown() and trackVersion~=ownedVersion then
+            trackVersion=ownedVersion
+            pcall(refreshTracker)
+        end
+    end
+    -- warm up shortly after login so counts and Find items are ready when the window opens
+    if warmAt then
+        warmAt=warmAt-dt
+        if warmAt<=0 then
+            warmAt=nil
+            pcall(function()
+                if C.countAcct then for name in pairs(C.items) do wantOwned(name) end end
+                if not itemIndex and not startIndex(true) then warmAt=10 end
+            end)
+        end
+    end
+    elapsed=elapsed+dt
     if elapsed>=2 then
         elapsed=0
         if win then
             local ok,err=pcall(function() if win:IsShown() then refreshCart() end end)
             if not ok then say('Refresh failed: '..tostring(err)) end
         end
+        if trackerShown() then
+            local ok,err=pcall(function() refreshTracker(); saveTrackerPosition() end)
+            if not ok then say('Tracker refresh failed: '..tostring(err)) end
+        end
+    end
+end
+-- Your bag changed (picked up, crafted, moved to a chest...): count your list's items again soon.
+function ShroudOnInventoryChanged()
+    for name in pairs(C.items) do
+        local o=owned[string.lower(name)]
+        if o and clockNow-o.at>5 then o.at=-math.huge end
+    end
+    for _,cell in ipairs(itemCells) do
+        local o=owned[string.lower(cell.name)]
+        if o and clockNow-o.at>5 then o.at=-math.huge end
     end
 end
 function ShroudOnDisableScript()
+    saveCounts()
     openRequested=false; toggleRequested=false
     if win then pcall(function() win:Destroy() end); win=nil end
     if launcher then pcall(function() launcher:Destroy() end); launcher=nil end
+    if tracker then saveTrackerPlace(); pcall(function() tracker.win:Destroy() end); tracker=nil end
 end
 
