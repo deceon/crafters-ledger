@@ -1,6 +1,7 @@
 -- Crafters Ledger v3.3.0. Legacy ShoppingCart commands and save file remain compatible.
 ShoppingCart = {items={},projects={},sources={},amounts={},countInv=true,countAcct=false,
-    tracker={shown=false,shade=25,x=nil,y=nil,w=nil,h=nil},untracked={}}
+    tracker={shown=false,shade=25,x=nil,y=nil,w=nil,h=nil},untracked={},
+    spots={}}                 -- where you marked a chest: key -> {raw,x,y,z}
 MarketBasket = ShoppingCart
 CraftersLedger = ShoppingCart
 local C=ShoppingCart
@@ -44,6 +45,9 @@ function C.save()
             '\t',tostring(t.w or ''),'\t',tostring(t.h or ''),'\n')
         -- recipes taken off the tracker (still on the shopping list)
         for title in pairs(C.untracked) do f:write('@untrack\t',title,'\n') end
+        for key,sp in pairs(C.spots) do
+            f:write('@spot\t',key,'\t',sp.raw,'\t',string.format('%.2f\t%.2f\t%.2f',sp.x,sp.y,sp.z),'\n')
+        end
         f:close()
     end)
     if not ok then say('Save failed: '..tostring(err)); return false end
@@ -155,6 +159,9 @@ local function loadCart()
                 C.tracker={shown=shown=='1',shade=math.min(90,tonumber(shade) or 25),x=tonumber(x),y=tonumber(y),
                     w=tonumber(w),h=tonumber(h)}
             end
+        elseif line:sub(1,6)=='@spot\t' then
+            local key,raw,x,y,z=line:match('^@spot\t([^\t]+)\t([^\t]+)\t([%-%d%.]+)\t([%-%d%.]+)\t([%-%d%.]+)$')
+            if key then C.spots[key]={raw=raw,x=tonumber(x),y=tonumber(y),z=tonumber(z)} end
         elseif line:sub(1,9)=='@untrack\t' then
             local title=line:match('^@untrack\t([^\t]+)$')
             if valid(title) then C.untracked[title]=true end
@@ -890,6 +897,36 @@ local function wherePlaces(o)
     end)
     return order
 end
+-- The compass: the game's search says which scene and container hold an item, not where the container
+-- stands. Stand by a chest and click Mark to remember its spot; Compass then points the game's compass
+-- (its beacon, the one /beacon sets) at it while you're in that scene.
+local function spotKey(loc,box) return string.lower(tostring(loc)..'|'..tostring(box)) end
+local function hereRaw()
+    if type(ShroudGetCurrentSceneNameRaw)~='function' then return nil end
+    local ok,raw=pcall(ShroudGetCurrentSceneNameRaw)
+    if ok and type(raw)=='string' and raw~='' then return raw end
+end
+local function markSpot(loc,box)
+    local x,y,z=ShroudPlayerX,ShroudPlayerY,ShroudPlayerZ
+    local raw=hereRaw()
+    if type(x)~='number' or type(y)~='number' or type(z)~='number' or x~=x or not raw then
+        msg('Your position is not available right now. Try again in a moment.'); return false
+    end
+    C.spots[spotKey(loc,box)]={raw=raw,x=x,y=y,z=z}; C.save()
+    msg('Marked where you stand as '..box..'. Compass will point here from anywhere in this scene.')
+    return true
+end
+local function pointAt(loc,box)
+    local sp=C.spots[spotKey(loc,box)]
+    if not sp then return end
+    if hereRaw()~=sp.raw then
+        msg(box..' is in '..tostring(loc)..'. Go there, then click Compass again.'); return
+    end
+    if type(ShroudSetBeacon)~='function' then msg('This game client cannot set the compass.'); return end
+    local ok,set=pcall(ShroudSetBeacon,sp.x,sp.y,sp.z,tostring(box):gsub('[%[%]<>]',''):sub(1,40))
+    if ok and set~=false then msg('Your compass points at '..box..'. Type /beacon clear to remove it.')
+    else msg('The game did not set the compass right now. Try again in a moment.') end
+end
 local function fillWhere(cell)
     cell.where:Clear()
     local k=string.lower(cell.name)
@@ -914,11 +951,24 @@ local function fillWhere(cell)
     for _,p in ipairs(places) do
         local pk=k..'|'..p.key
         local inside=UI.Column{visible=placeOpen[pk]==true,style={paddingLeft=40,flexShrink=0}}
+        local findable=p.place=='houseStorage' or p.place=='bank' or p.place=='unknown'
         for _,box in ipairs(p.boxOrder) do
-            inside:Add(row{flexLabel(box),label(tostring(p.boxes[box]),70)})
+            local parts={flexLabel(box),label(tostring(p.boxes[box]),70)}
+            if findable then
+                local known=C.spots[spotKey(p.label,box)]~=nil
+                if known then
+                    parts[#parts+1]=UI.Button{text='Compass',style={width=90},
+                        tooltip='Point your compass at '..box..' (works in its scene)',
+                        onClick=function() pointAt(p.label,box) end}
+                end
+                parts[#parts+1]=UI.Button{text=known and 'Re-mark' or 'Mark',style={width=80},
+                    tooltip='Stand next to '..box..' and click to remember where it is, for the compass',
+                    onClick=function() if markSpot(p.label,box) then fillWhere(cell) end end}
+            end
+            inside:Add(row(parts))
         end
         local header={}
-        if #p.boxOrder>1 or p.boxOrder[1]~='Not in a container' then
+        if #p.boxOrder>1 or p.boxOrder[1]~='Not in a container' or findable then
             local toggle
             toggle=UI.Button{text=placeOpen[pk] and '-' or '+',style={width=32},
                 tooltip='Show the containers here',onClick=function()
