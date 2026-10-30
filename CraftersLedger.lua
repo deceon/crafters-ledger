@@ -237,7 +237,9 @@ local clockNow=0
 local owned={}           -- lower name -> {at,name,total,carried,account,rows,missing,truncated}
 local ownedWant,ownedQueued,inflight={},{},{}
 local ownedVersion=0     -- goes up with every answer, so pages know to redraw
-local OWNED_MAX,OWNED_TIMEOUT,OWNED_AGE=8,4,300
+-- One search at a time: the game runs one "search everywhere" at a time, like its own Search All My
+-- Stuff window, and a second one sent meanwhile may get no answer.
+local OWNED_MAX,OWNED_TIMEOUT,OWNED_AGE,OWNED_RETRY=1,10,300,30
 local PLACE_NAMES={carried='Bag',bank='Bank',houseStorage='House',otherCharacters='Other character',
     mail='Mail',crafting='Crafting',vendorListings='Vendor',ransom='Ransom',unknown='Other'}
 local function canCountAccount() return type(ShroudSearchOwnedItems)=='function' end
@@ -269,18 +271,29 @@ local function storeOwned(asked,res)
                 container=field(r,'container'),quantity=tonumber(field(r,'quantity')) or 0}
         end
     end
+    if field(res,'ok')==false then
+        -- the game said no: keep the old numbers if there are any, and ask again a bit later
+        local why=tostring(field(res,'error') or field(res,'reason') or field(res,'message') or 'no reason given')
+        local old=owned[k]
+        if old and not old.failed then old.at=clockNow-OWNED_AGE+OWNED_RETRY; old.why=why; return end
+        owned[k]={at=clockNow-OWNED_AGE+OWNED_RETRY,name=asked,failed=true,why=why,total=0,carried=0,account=0,rows={}}
+        return
+    end
     owned[k]={at=clockNow,name=field(res,'name') or asked,total=total,carried=carried,
         account=math.max(0,total-carried),rows=rows,truncated=field(res,'truncated')==true,
-        missing=field(res,'ok')==false}
+        missing=total==0 and #rows==0}
 end
 local function pumpOwned()
     if not canCountAccount() then return end
     local busy=0
     for k,t0 in pairs(inflight) do
         if clockNow-t0>OWNED_TIMEOUT then
-            -- no answer: usually not an exact item name. Count it as none and try again later.
+            -- no answer: often not an exact item name, sometimes just a slow search. Keep any old
+            -- numbers, show the quick bag-and-bank count meanwhile, and ask again a bit later.
             inflight[k]=nil; ownedVersion=ownedVersion+1
-            owned[k]={at=clockNow,name=k,missing=true,total=0,carried=0,account=0,rows={}}
+            local old=owned[k]
+            if old and not old.failed then old.at=clockNow-OWNED_AGE+OWNED_RETRY
+            else owned[k]={at=clockNow-OWNED_AGE+OWNED_RETRY,name=k,failed=true,why='no answer',total=0,carried=0,account=0,rows={}} end
         else busy=busy+1 end
     end
     while busy<OWNED_MAX and #ownedWant>0 do
@@ -323,7 +336,7 @@ local function saveCounts()
     pcall(function()
         local f=io.open(countsFile,'w'); if not f then return end
         for k,o in pairs(owned) do
-            if not o.missing and valid(o.name) then
+            if not o.missing and not o.failed and valid(o.name) then
                 f:write('@item\t',o.name,'\t',tostring(o.total),'\t',tostring(o.carried),'\n')
                 for _,r in ipairs(o.rows or {}) do
                     f:write('@row\t',o.name,'\t',tostring(r.place),'\t',(tostring(r.location or '')):gsub('[\t\r\n]',' '),'\t',
@@ -354,6 +367,33 @@ local function loadCounts()
     end)
 end
 loadCounts()
+-- /lua code CraftersLedger.check('Black Pearl') prints exactly what the game answers for an item.
+function C.check(name)
+    name=tostring(name or '')
+    if type(ShroudSearchOwnedItems)~='function' then say('This game client has no account search.'); return end
+    local t0=clockNow
+    say('Asking the game about "'..name..'"...')
+    local function dump(v,pad,depth)
+        if type(v)~='table' then say(pad..tostring(v)); return end
+        local keys={}
+        for key in pairs(v) do keys[#keys+1]=key end
+        table.sort(keys,function(a,b) return tostring(a)<tostring(b) end)
+        for _,key in ipairs(keys) do
+            local x=v[key]
+            if type(x)=='table' and depth<3 then say(pad..tostring(key)..':'); dump(x,pad..'   ',depth+1)
+            else say(pad..tostring(key)..' = '..tostring(x)) end
+        end
+    end
+    local ok,err=pcall(ShroudSearchOwnedItems,name,function(res,...)
+        say(string.format('Answer after %.1f s:',clockNow-t0)); dump(res,'   ',1)
+        if select('#',...)>0 then say('   (and '..select('#',...)..' more values)') end
+    end)
+    if not ok then say('The game refused: '..tostring(err)) end
+    if type(ShroudGetOwnedCounts)=='function' then
+        local ok2,q=pcall(ShroudGetOwnedCounts,name)
+        say('Quick count:'); dump(ok2 and q or ('error '..tostring(q)),'   ',1)
+    end
+end
 -- How many of an item the checked places hold. nil while an account count is still on its way.
 -- inv is counts(): what this character carries, read straight from the bag.
 local function haveOf(name,inv)
@@ -362,15 +402,18 @@ local function haveOf(name,inv)
     if not C.countAcct or not canCountAccount() then return bag end
     wantOwned(name)
     local o=owned[k]
+    if o and o.failed then o=nil end
     local acct=o and o.account
+    local carried=o and o.carried
     if not o then
-        -- full search still on its way: bag and bank for now
+        -- full search still on its way (or no answer): bag and bank for now
         local q=quickCount(name)
-        if not q then return nil end
-        acct=q.account
+        if not q then return bag and (C.countInv and bag or nil) end
+        acct=q.account; carried=q.carried
     end
     if not C.countInv then return acct end
-    return (bag or (o and o.carried) or 0)+acct
+    -- the game's count includes bags you carry; the plain bag list doesn't look inside them
+    return math.max(bag or 0,carried or 0)+acct
 end
 local function countingText()
     if C.countAcct and canCountAccount() then
@@ -793,7 +836,7 @@ local function findItems()
             for _,item in pairs(bag) do consider(field(item,'name'),nil) end
         end
         -- items the game has already counted for you
-        for _,o in pairs(owned) do if not o.missing and type(o.name)=='string' then consider(o.name,nil) end end
+        for _,o in pairs(owned) do if not o.missing and not o.failed and type(o.name)=='string' then consider(o.name,nil) end end
     end
     if el.itemStatus then
         local n=0; for _ in pairs(itemIndex) do n=n+1 end
@@ -855,11 +898,17 @@ local function fillWhere(cell)
     if not C.countAcct then
         -- bag only: the bag's count is all there is to show
         local inv=counts()
-        cell.where:Add(row{label('Bag',nil),UI.Label{text='',style={flexGrow=1}},label(tostring(inv and (inv[k] or 0) or '?'),70)})
+        local b=inv and (inv[k] or 0)
+        if o and not o.failed and b then b=math.max(b,o.carried or 0) end
+        cell.where:Add(row{label('Bag',nil),UI.Label{text='',style={flexGrow=1}},label(tostring(b or '?'),70)})
         cell.where:Add(label('Tick Account at the top to see the bank, house chests and other characters.'))
         return
     end
-    if o.missing then cell.where:Add(label('The game found none. Check the exact item name.')); return end
+    if o.failed then
+        cell.where:Add(label('The game has not answered yet ('..tostring(o.why)..'). Showing bag and bank for now; trying again shortly.'))
+        return
+    end
+    if o.missing then cell.where:Add(label('You have none of these anywhere the game can see.')); return end
     local places=wherePlaces(o)
     if #places==0 then cell.where:Add(label('None in the places you are counting.')) end
     for _,p in ipairs(places) do
@@ -959,8 +1008,8 @@ refreshItems=function()
         else
             text='Have '..n
             local o=owned[string.lower(cell.name)]
-            if C.countAcct and C.countInv and o and inv then
-                text=text..' (bag '..(inv[string.lower(cell.name)] or 0)..')'
+            if C.countAcct and C.countInv and o and not o.failed and inv then
+                text=text..' (bag '..math.max(inv[string.lower(cell.name)] or 0,o.carried or 0)..')'
             end
         end
         -- on the shopping list: what the list needs and what is still to get
