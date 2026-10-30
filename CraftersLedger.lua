@@ -1,7 +1,8 @@
 -- Crafters Ledger v3.3.0. Legacy ShoppingCart commands and save file remain compatible.
 ShoppingCart = {items={},projects={},sources={},amounts={},countInv=true,countAcct=false,
     tracker={shown=false,shade=25,x=nil,y=nil,w=nil,h=nil},untracked={},
-    spots={}}                 -- where you marked a chest: key -> {raw,x,y,z}
+    spots={},                 -- where you marked a chest: key -> {raw,x,y,z}
+    nicknames={}}             -- your own name for a container: key -> "Reagent Chest"
 MarketBasket = ShoppingCart
 CraftersLedger = ShoppingCart
 local C=ShoppingCart
@@ -45,6 +46,7 @@ function C.save()
             '\t',tostring(t.w or ''),'\t',tostring(t.h or ''),'\n')
         -- recipes taken off the tracker (still on the shopping list)
         for title in pairs(C.untracked) do f:write('@untrack\t',title,'\n') end
+        for key,nick in pairs(C.nicknames) do f:write('@nickname\t',key,'\t',nick,'\n') end
         for key,sp in pairs(C.spots) do
             f:write('@spot\t',key,'\t',sp.raw,'\t',string.format('%.2f\t%.2f\t%.2f',sp.x,sp.y,sp.z),'\n')
         end
@@ -159,6 +161,9 @@ local function loadCart()
                 C.tracker={shown=shown=='1',shade=math.min(90,tonumber(shade) or 25),x=tonumber(x),y=tonumber(y),
                     w=tonumber(w),h=tonumber(h)}
             end
+        elseif line:sub(1,10)=='@nickname\t' then
+            local key,nick=line:match('^@nickname\t([^\t]+)\t([^\t]+)$')
+            if key and valid(nick) then C.nicknames[key]=nick end
         elseif line:sub(1,6)=='@spot\t' then
             local key,raw,x,y,z=line:match('^@spot\t([^\t]+)\t([^\t]+)\t([%-%d%.]+)\t([%-%d%.]+)\t([%-%d%.]+)$')
             if key then C.spots[key]={raw=raw,x=tonumber(x),y=tonumber(y),z=tonumber(z)} end
@@ -909,6 +914,10 @@ local function niceLocation(loc)
     return out
 end
 local function spotKey(loc,box) return string.lower(tostring(loc)..'|'..tostring(box)) end
+local naming=nil            -- the container whose name box is open
+local function shownBox(loc,box)
+    return C.nicknames[spotKey(loc,box)] or box
+end
 local function hereRaw()
     if type(ShroudGetCurrentSceneNameRaw)~='function' then return nil end
     local ok,raw=pcall(ShroudGetCurrentSceneNameRaw)
@@ -921,7 +930,7 @@ local function markSpot(loc,box)
         msg('Your position is not available right now. Try again in a moment.'); return false
     end
     C.spots[spotKey(loc,box)]={raw=raw,x=x,y=y,z=z}; C.save()
-    msg('Marked where you stand as '..box..'. Compass will point here from anywhere in this scene.')
+    msg('Marked where you stand as '..shownBox(loc,box)..'. Compass will point here from anywhere in this scene.')
     return true
 end
 local beaconOn=nil          -- the chest the compass points at now (set by this add-on)
@@ -938,18 +947,18 @@ local function unmarkSpot(loc,box)
     local key=spotKey(loc,box)
     if beaconOn==key then clearCompass() end
     C.spots[key]=nil; C.save()
-    msg('Forgot where '..box..' is.')
+    msg('Forgot where '..shownBox(loc,box)..' is.')
 end
 local function pointAt(loc,box)
     local key=spotKey(loc,box)
     local sp=C.spots[key]
     if not sp then return end
     if hereRaw()~=sp.raw then
-        msg(box..' is in '..niceLocation(loc)..'. Go there, then click Compass again.'); return
+        msg(shownBox(loc,box)..' is in '..niceLocation(loc)..'. Go there, then click Compass again.'); return
     end
     if type(ShroudSetBeacon)~='function' then msg('This game client cannot set the compass.'); return end
-    local ok,set=pcall(ShroudSetBeacon,sp.x,sp.y,sp.z,tostring(box):gsub('[%[%]<>]',''):sub(1,40))
-    if ok and set~=false then beaconOn=key; msg('Your compass points at '..box..'. Click Clear compass to remove it.')
+    local ok,set=pcall(ShroudSetBeacon,sp.x,sp.y,sp.z,tostring(shownBox(loc,box)):gsub('[%[%]<>]',''):sub(1,40))
+    if ok and set~=false then beaconOn=key; msg('Your compass points at '..shownBox(loc,box)..'. Click Clear compass to remove it.')
     else msg('The game did not set the compass right now. Try again in a moment.') end
 end
 local redrawWhere
@@ -979,10 +988,11 @@ local function fillWhere(cell)
         local inside=UI.Column{visible=placeOpen[pk]==true,style={paddingLeft=40,flexShrink=0}}
         local findable=p.place=='houseStorage' or p.place=='bank' or p.place=='unknown'
         for _,box in ipairs(p.boxOrder) do
-            local parts={flexLabel(box),label(tostring(p.boxes[box]),70)}
+            local key=spotKey(p.label,box)
+            local nick=C.nicknames[key]
+            local parts={flexLabel(nick and (nick..'  ('..box..')') or box),label(tostring(p.boxes[box]),70)}
             if findable then
-                local known=C.spots[spotKey(p.label,box)]~=nil
-                local key=spotKey(p.label,box)
+                local known=C.spots[key]~=nil
                 if known then
                     local pointing=beaconOn==key
                     parts[#parts+1]=UI.Button{text=pointing and 'Clear compass' or 'Compass',style={width=pointing and 130 or 90},
@@ -1001,7 +1011,27 @@ local function fillWhere(cell)
                         onClick=function() unmarkSpot(p.label,box); redrawWhere() end}
                 end
             end
+            if box~='Not in a container' then
+                parts[#parts+1]=UI.Button{text='Name',style={width=70},
+                    tooltip='Give '..box..' a name of your own, like Reagent Chest',
+                    onClick=function() naming=(naming~=key) and key or nil; redrawWhere() end}
+            end
             inside:Add(row(parts))
+            if naming==key then
+                local field2
+                local function saveName()
+                    local nick2=trim(field2:GetText())
+                    if nick2=='' then C.nicknames[key]=nil; msg(box..' shows its own name again.')
+                    elseif not valid(nick2) then msg('That name can not be used.'); return
+                    else C.nicknames[key]=nick2; msg(box..' is now called '..nick2..'.') end
+                    naming=nil; C.save(); redrawWhere()
+                end
+                field2=UI.TextField{text=nick or '',placeholder='Your name for it, e.g. Reagent Chest',maxLength=40,
+                    style={flexGrow=1},onSubmit=saveName}
+                inside:Add(row{field2,UI.Button{text='Save',style={width=70},onClick=saveName},
+                    UI.Button{text='Cancel',style={width=80},onClick=function() naming=nil; redrawWhere() end}})
+                inside:Add(label('Leave it empty and Save to go back to the game\'s name.'))
+            end
         end
         local header={}
         if #p.boxOrder>1 or p.boxOrder[1]~='Not in a container' or findable then
@@ -1112,7 +1142,7 @@ refreshItems=function()
         end
         if cell.lastText~=text then cell.have:SetText(text); cell.lastText=text end
         if cell.lastColor~=color then pcall(function() cell.have:SetStyle{color=color} end); cell.lastColor=color end
-        if itemOpen[string.lower(cell.name)] and cell.version~=ownedVersion then
+        if itemOpen[string.lower(cell.name)] and cell.version~=ownedVersion and not naming then
             fillWhere(cell); cell.version=ownedVersion
         end
     end
