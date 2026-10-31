@@ -2,14 +2,15 @@
 
 Find items, account-wide counts and an on-screen tracker.
 
-- New Find items page: type part of a name (like garnet) to find every item your recipes make or use, plus anything on your shopping list. Each item shows which recipes make it and use it, and has an Add button.
+- New Find items page: type a name or any words from it, in any order (like black pearl), to find every item your recipes make or use, everything in your bag and your shopping list. Each item shows how many you have, which recipes make and use it, and Need / To get when it is on your shopping list. Add puts it on your list.
 - Inventory and Account checkboxes at the top choose what Have counts: your bag, your account (bank, house chests, other characters, mail, vendor listings), or both. They apply to Find items, the shopping list and recipe details, and are saved.
 - + and - on each item show where it is: your bag, bank and each house lot with its own total, and the containers inside each.
 - Compass: stand next to a chest and click Mark on its line once; after that, Compass points the game's compass at it while you're in that scene. Clear compass stops pointing; Unmark forgets the chest.
 - Name: give any container a name of your own, like Reagent Chest. Crafters Ledger shows it (with the game's name beside it) and the compass uses it.
 - On-screen tracker: the shopping list on screen like the quest list, with recipes as headings and what you still need under them. Its title bar only shows when you point at it. Stretch it from any edge, right-click it to fade it, and click x on a recipe to take it off the tracker (it stays on your shopping list; Track all brings it back). Turn it on from the shopping list (Show / hide) or with /ledgertrack. Its place and size are saved.
-- Counts are faster: more lookups at once, the list redraws as counts arrive, and the item list and counts start getting ready shortly after you log in.
+- Counts show quickly: your last counts are saved and show straight away, a quick bag-and-bank count fills in while the full account search runs, and the item list gets ready shortly after you log in.
 - Refresh counts also asks the game again for bank and chest counts.
+- Counts include bags you carry, and the game's internal scene names are left out of place names.
 
 # Crafters Ledger 3.2.17
 

@@ -3,7 +3,7 @@
   "slug": "crafters-ledger",
   "name": "Crafters Ledger",
   "version": "3.3.0",
-  "description": "A crafting planner and saved shopping list. Search recipes, check skill requirements and output, and add materials for your batch. Expand each crafted item to see its supplies. Find any item by part of its name and see how many you own in your bag, bank, house chests and on other characters. Show the shopping list on screen like the quest list, see-through. Open with /ledger or the book-and-quill icon.",
+  "description": "A crafting planner and saved shopping list. Search recipes, check skill requirements and output, and add materials for your batch. Expand each crafted item to see its supplies. Find any item and see how many you own in your bag, bank, house chests and on other characters, with a compass to find your chests. Show the shopping list on screen like the quest list, see-through. Open with /ledger or the book-and-quill icon.",
   "author": "Kronic",
   "files": [
     "CraftersLedger.lua"
