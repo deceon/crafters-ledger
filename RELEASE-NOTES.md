@@ -1,3 +1,10 @@
+# Crafters Ledger 3.4.1
+
+- Simplify item lookup to SotAWiki only.
+- Remove Vendor reference and other website choices.
+- Build item-page links from the item name, excluding quantities and recipe labels; safely encode punctuation.
+- Clarify how to copy a link into the browser.
+
 # Crafters Ledger 3.4.0
 
 - Simplified navigation: Add items, Cart, Recipes, Activity; refreshed icon and compact layout.

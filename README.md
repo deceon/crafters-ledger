@@ -1,6 +1,6 @@
 # Crafters Ledger
 
-Creator: Kronic | Version 3.4.0
+Creator: Kronic | Version 3.4.1
 
 Open with /ledger, the ledger icon, or a shortcut configured in Add-Ons. Toggle the on-screen Shopping list with /ledgertrack.
 
@@ -31,3 +31,6 @@ Install from Community Addons, or extract the complete crafters-ledger folder in
 Production uses CraftersLedger-data.tsv and CraftersLedger-counts.tsv in the main Lua folder. Preserve these files when updating. Test data remains separate and is not copied automatically. API 37+ is required; account-wide counts require API 55+.
 
 Your existing inventory-location search, container labels and compass marks remain supported. Stand beside a chest to mark its location before using its compass action.
+
+## SotAWiki lookup
+Click the info symbol beside an item in Cart, Shopping list or Wishlist. The lookup supplies its SotAWiki item-page URL. Copy it, press Ctrl+L in your browser, paste and press Enter. Vendor-reference and other website choices are removed.

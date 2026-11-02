@@ -1,4 +1,4 @@
--- Crafters Ledger v3.4.0. Legacy ShoppingCart commands and save file remain compatible.
+-- Crafters Ledger v3.4.1. Legacy ShoppingCart commands and save file remain compatible.
 ShoppingCart = {items={},projects={},sources={},amounts={},wanted={},wishes={},trackFilter='Still needed',trackView='By item',countInv=true,countAcct=false,
     tracker={shown=false,shade=90,x=nil,y=nil,w=nil,h=nil},untracked={},
     spots={},                 -- where you marked a chest: key -> {raw,x,y,z}
@@ -45,7 +45,7 @@ local function say(s,details)
         if type(ShroudLuaPath)=='string' and type(io)=='table' and type(io.open)=='function' then
             pcall(function()
                 local log=io.open(ShroudLuaPath..'/CraftersLedger-errors.log','a')
-                if log then log:write('v3.4.0 [',buildStage,'] ',text,'\n'); log:close() end
+                if log then log:write('v3.4.1 [',buildStage,'] ',text,'\n'); log:close() end
             end)
         end
         local reason=text:match('%.lua:%b():%s*(.*)')
@@ -55,7 +55,7 @@ local function say(s,details)
     else print(brief) end
 end
 local function lifecycle(status,color)
-    local text='Crafters Ledger v3.4.0: '
+    local text='Crafters Ledger v3.4.1: '
     if type(ShroudConsoleLog)=='function' then
         ShroudConsoleLog(text..'['..color..']'..status..'[-]')
     else
@@ -521,7 +521,21 @@ end
 local sourceWindow=nil
 local sourceWindowItem=nil
 local sourceWindowOpen=false
+local function lookupItemName(name)
+    local clean=tostring(name or ''):match('^%s*(.-)%s*$')
+    clean=clean:gsub('^%d+%s*[xX×]%s*','')
+    -- A labelled ingredient row: use its crafted item, not the whole row.
+    if not clean:match('^Recipe:') and not clean:match('^Pattern:') then
+        clean=clean:match('^(.-):') or clean
+    end
+    clean=clean:gsub('%s*:%s*%d+%s*$',''):match('^%s*(.-)%s*$')
+    return clean
+end
+local function lookupEncode(text)
+    return (text:gsub('[^%w_%-%.~]',function(c) return string.format('%%%02X',string.byte(c)) end))
+end
 local function showItemSource(name)
+    name=lookupItemName(name)
     if sourceWindow and sourceWindowItem==name and sourceWindowOpen then
         sourceWindow:Hide(); sourceWindowOpen=false; return
     end
@@ -536,16 +550,22 @@ local function showItemSource(name)
         end
     end
     if sourceWindow then pcall(function() sourceWindow:Destroy() end); sourceWindow=nil end
-    local ref=data and data.reference or ('https://sotawiki.org/sota/'..name:gsub(' ','_'))
-    sourceWindow=UI.Window{id='crafters_ledger_item_source',title='Where to get it',width=620,height=350,onClose=function() sourceWindowOpen=false end,
-        minWidth=540,minHeight=260,escCloses=true,children={
+    local wikiName=recipe or name
+    local ref='https://sotawiki.org/sota/'..lookupEncode(wikiName:gsub(' ','_'))
+    local lookupURL=UI.TextField{text=ref,tooltip='Select and copy the link into your browser'}
+    local function lookupButton(title,url)
+        return UI.Button{text=title,onClick=function() lookupURL:SetText(url) end}
+    end
+    sourceWindow=UI.Window{id='crafters_ledger_item_source',title='SotAWiki lookup',width=620,height=380,onClose=function() sourceWindowOpen=false end,
+        minWidth=540,minHeight=350,escCloses=true,children={
             UI.Label{text=name,class='heading',style={fontSize=17,whiteSpace='wrap'}},
-            label('Source: '..(data and data.source or 'Unknown — not yet in the reference list.')),
-            label('Vendor type: '..(data and data.vendor or 'Unknown')),
-            label('Crafting trade: '..trade),
-            UI.Label{text=data and data.location or 'Check the wiki for this item. No vendor or location has been verified here.',style={whiteSpace='wrap'}},
-            label(data and 'Reference checked: November 2, 2026. Vendor stock may change.' or 'Suggested wiki page (not verified):'),
-            UI.TextField{text=ref,tooltip='Select and copy this reference URL'},
+            label('Vendor: '..(data and data.vendor or 'Not verified')),
+            label('Trade: '..trade),
+            UI.Label{text=data and data.location or 'Look up this item on SotAWiki.',style={whiteSpace='wrap'}},
+            lookupButton('SotAWiki — item page',ref),
+            label('Copy this link. In your browser press Ctrl+L, then paste and Enter.'),
+            label('Search name: '..(recipe or name)),
+            lookupURL,
         }}
     sourceWindowItem=name; sourceWindowOpen=true
     sourceWindow:Show()

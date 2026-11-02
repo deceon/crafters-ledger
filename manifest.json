@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "slug": "crafters-ledger",
   "name": "Crafters Ledger",
-  "version": "3.4.0",
+  "version": "3.4.1",
   "description": "Crafting plans, saved cart and wishlist, recipe lookup, account inventory locations, activity history and a compact Shopping list tracker. Open with /ledger.",
   "author": "Kronic",
   "files": [
