@@ -1,3 +1,18 @@
+# Crafters Ledger 3.4.0
+
+- Simplified navigation: Add items, Cart, Recipes, Activity; refreshed icon and compact layout.
+- Crafting plans accept item names and quantities, bulk paste and Enter-per-item entry. Calculate direct ingredients from learned recipes and choose alternative materials.
+- Add valid plan items even when others fail; retain unresolved entries and report item-specific errors.
+- Grouped and combined Cart views show Note, Required, Owned and Still to get. Calculated resource quantities are read-only. Clear cart uses confirmation.
+- Search learned and missing recipes. Empty searches stay blank. Mark missing recipes as wanted or add their scrolls to the cart.
+- General Wishlist opens separately from Cart and holds any item and quantity, with Add to cart actions.
+- Colored Activity history records actions and errors. Full technical errors also append to a local error log.
+- Compact Shopping list tracker has minimal remaining-quantity rows, independent saved filters/layout, background options and source-information icons.
+- Source popups show verified vendor type, crafting trade, location and reference for a small starter set; unknown items are clearly identified.
+- Correct slash-command registration, tracker input compatibility, status colors and quantity wording.
+
+Limitations: automatic calculations require learned recipes and do not expand refined ingredients into raw resources. Source data is a small offline reference set. Activity history is session-only.
+
 # Crafters Ledger 3.3.0
 
 Find items, account-wide counts and an on-screen tracker.

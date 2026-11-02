@@ -1,6 +1,6 @@
--- Crafters Ledger v3.3.0. Legacy ShoppingCart commands and save file remain compatible.
-ShoppingCart = {items={},projects={},sources={},amounts={},countInv=true,countAcct=false,
-    tracker={shown=false,shade=25,x=nil,y=nil,w=nil,h=nil},untracked={},
+-- Crafters Ledger v3.4.0. Legacy ShoppingCart commands and save file remain compatible.
+ShoppingCart = {items={},projects={},sources={},amounts={},wanted={},wishes={},trackFilter='Still needed',trackView='By item',countInv=true,countAcct=false,
+    tracker={shown=false,shade=90,x=nil,y=nil,w=nil,h=nil},untracked={},
     spots={},                 -- where you marked a chest: key -> {raw,x,y,z}
     nicknames={}}             -- your own name for a container: key -> "Reagent Chest"
 MarketBasket = ShoppingCart
@@ -8,7 +8,60 @@ CraftersLedger = ShoppingCart
 local C=ShoppingCart
 local filename = type(ShroudLuaPath)=='string' and
     (ShroudLuaPath..'/CraftersLedger-data.tsv') or nil
-local function say(s) print('[Crafters Ledger] '..s) end
+local activityHistory,activityDirty,activityPage={},true,1
+local refreshActivity=nil
+local buildStage='loading'
+local function say(s,details)
+    local text=tostring(s)
+    local lower=string.lower(text)
+    local color='66CCFF' -- information, updates, and cancelled actions
+    if lower:find('cancel',1,true) then
+        color='66CCFF'
+    elseif lower:find('error:',1,true) or lower:find('invalid',1,true) or lower:find('no ungrouped',1,true) or lower:find('not found',1,true) or lower:find('failed',1,true) or lower:find('unavailable',1,true) or
+        lower:find('could not',1,true) or lower:find('nothing added',1,true) or
+        lower:find('nothing imported',1,true) or lower:find('nothing changed',1,true) then
+        color='FF6666'
+    elseif lower:find('confirm',1,true) or lower:find('click sure?',1,true) then
+        color='66CCFF'
+    elseif lower:find('cleared',1,true) or lower:find('removed',1,true) or lower:find('forgot',1,true) then
+        color='FF6666'
+    elseif lower:find('added',1,true) or lower:find('saved',1,true) or
+        lower:find('grouped',1,true) or lower:find('labeled',1,true) then
+        color='66FF66'
+    end
+    local stamp=''
+    if type(os)=='table' and type(os.date)=='function' then
+        local ok,value=pcall(os.date,'%H:%M:%S')
+        if ok then stamp=value..'  ' end
+    end
+    table.insert(activityHistory,1,{text=stamp..text,details=details,color=color})
+    if #activityHistory>100 then table.remove(activityHistory) end
+    activityPage=1; activityDirty=true
+    local brief=text:gsub('[\r\n]+',' ')
+    if details then brief=(text:match('^[^%.]+') or text)..'. Details: Activity tab.' end
+    local problem=lower:find('failed',1,true) or lower:find('unavailable',1,true) or
+        lower:find('could not',1,true) or lower:find('error:',1,true)
+    if problem then
+        if type(ShroudLuaPath)=='string' and type(io)=='table' and type(io.open)=='function' then
+            pcall(function()
+                local log=io.open(ShroudLuaPath..'/CraftersLedger-errors.log','a')
+                if log then log:write('v3.4.0 [',buildStage,'] ',text,'\n'); log:close() end
+            end)
+        end
+        local reason=text:match('%.lua:%b():%s*(.*)')
+        brief='Error ['..buildStage..']: '..(reason or text:gsub('[A-Za-z]:[\\/][^\n]-%.lua','script'))
+    elseif #brief>140 then brief=brief:sub(1,137)..'...' end
+    if type(ShroudConsoleLog)=='function' then ShroudConsoleLog('['..color..']'..brief..'[-]')
+    else print(brief) end
+end
+local function lifecycle(status,color)
+    local text='Crafters Ledger v3.4.0: '
+    if type(ShroudConsoleLog)=='function' then
+        ShroudConsoleLog(text..'['..color..']'..status..'[-]')
+    else
+        print(text..status)
+    end
+end
 local function valid(name)
     return type(name)=='string' and #name>0 and not name:find('[\t\r\n]')
 end
@@ -21,6 +74,10 @@ function C.save()
         local names={}; for name in pairs(C.items) do names[#names+1]=name end
         table.sort(names)
         for _,name in ipairs(names) do f:write(name,'\t',tostring(C.items[name]),'\n') end
+        for name,n in pairs(C.wishes) do f:write('@wish\t',name,'\t',tostring(n),'\n') end
+        for name,r in pairs(C.wanted) do
+            f:write('@wanted\t',r.key,'\t',name,'\t',tostring(r.level or ''),'\n')
+        end
         for title,project in pairs(C.projects) do
             f:write('@project\t',title,'\t',tostring(project.crafts),'\t',project.output or '', '\n')
         end
@@ -40,11 +97,13 @@ function C.save()
             end
         end
         -- which places Have counts: the Inventory and Account checkboxes
+        f:write('@minimaltracker\t1\n')
+        f:write('@trackoptions\t',C.trackFilter,'\t',C.trackView,'\n')
         f:write('@counts\t',C.countInv and '1' or '0','\t',C.countAcct and '1' or '0','\n')
         local t=C.tracker
         f:write('@tracker\t',t.shown and '1' or '0','\t',tostring(t.shade),'\t',tostring(t.x or ''),'\t',tostring(t.y or ''),
             '\t',tostring(t.w or ''),'\t',tostring(t.h or ''),'\n')
-        -- recipes taken off the tracker (still on the shopping list)
+        -- recipes taken off the tracker (still on the cart)
         for title in pairs(C.untracked) do f:write('@untrack\t',title,'\n') end
         for key,nick in pairs(C.nicknames) do f:write('@nickname\t',key,'\t',nick,'\n') end
         for key,sp in pairs(C.spots) do
@@ -139,26 +198,30 @@ end
 local function loadCart()
     if not filename or type(io)~='table' or type(io.open)~='function' then return end
     local f=io.open(filename,'r')
-    if not f and type(ShroudLuaPath)=='string' then
-        for _,old in ipairs({ShroudLuaPath..'/ShoppingCart-data.tsv',
-            ShroudLuaPath..'/../shoppingcart/ShoppingCart-data.tsv'}) do
-            f=io.open(old,'r')
-            if f then say('Imported your previous shopping list.'); break end
-        end
-    end
     if not f then return end
     for line in f:lines() do
-        if line:sub(1,9)=='@project\t' then
+        if line:sub(1,6)=='@wish\t' then
+            local name,n=line:match('^@wish\t([^\t]+)\t(%d+)$')
+            if valid(name) and tonumber(n) and tonumber(n)>0 then C.wishes[name]=tonumber(n) end
+        elseif line:sub(1,8)=='@wanted\t' then
+            local key,name,level=line:match('^@wanted\t([^\t]+)\t([^\t]+)\t(.*)$')
+            if valid(key) and valid(name) then C.wanted[name]={key=key,name=name,level=tonumber(level)} end
+        elseif line:sub(1,9)=='@project\t' then
             local title,n,output=line:match('^@project\t([^\t]+)\t(%d+)\t(.*)$')
             if valid(title) and tonumber(n) then C.projects[title]={crafts=tonumber(n),output=output} end
         elseif line:sub(1,8)=='@source\t' then
             local name,title=line:match('^@source\t([^\t]+)\t([^\t]+)$')
             if valid(name) and valid(title) then C.sources[name]=C.sources[name] or {}; C.sources[name][title]=true end
+        elseif line=='@minimaltracker\t1' then C.minimalTracker=true
+        elseif line:match('^@trackoptions\t') then
+            local filter,view=line:match('^@trackoptions\t([^\t]+)\t([^\t]+)$')
+            if filter=='Still needed' or filter=='All resources' or filter=='Ready' then C.trackFilter=filter end
+            if view=='By item' or view=='Resource list' then C.trackView=view end
         elseif line:sub(1,9)=='@tracker\t' then
             local shown,shade,x,y,rest=line:match('^@tracker\t([01])\t(%d+)\t(%-?%d*)\t(%-?%d*)(.*)$')
             if shown then
                 local w,h=tostring(rest):match('^\t(%d*)\t(%d*)$')
-                C.tracker={shown=shown=='1',shade=math.min(90,tonumber(shade) or 25),x=tonumber(x),y=tonumber(y),
+                C.tracker={shown=shown=='1',shade=math.min(100,tonumber(shade) or 90),x=tonumber(x),y=tonumber(y),
                     w=tonumber(w),h=tonumber(h)}
             end
         elseif line:sub(1,10)=='@nickname\t' then
@@ -191,7 +254,7 @@ end
 local ok,err=pcall(loadCart)
 if not ok then say('Could not load saved cart: '..tostring(err)) end
 if ok and next(C.items)~=nil then C.save() end
-say('Loaded. Open with /ledger or the book icon.')
+lifecycle('Ready','00FF00')
 
 -- ShoppingCart v2: recipe browser and persistent material cart.
 -- UI constructors follow the Shroud.UI interface used by installed add-ons.
@@ -213,9 +276,9 @@ local function number(s)
     local n=tonumber(s)
     if n and n>=1 and n==math.floor(n) then return n end
 end
-local function msg(s)
+local function msg(s,details)
     if el.message then el.message:SetText(s) end
-    say(s)
+    say(s,details)
 end
 local function label(text,width)
     return UI.Label{text=tostring(text),style={width=width,flexShrink=width and 0 or 1,
@@ -445,6 +508,49 @@ local function sourceText(name)
     table.sort(names)
     return #names>0 and ('Used for: '..table.concat(names,', ')) or 'Unassigned - label from Recipes'
 end
+local function resourcePurpose(name)
+    local purposes={}
+    for title in pairs(C.sources[name] or {}) do
+        local p=C.projects[title]
+        purposes[#purposes+1]=p and (p.output or '')~='' and p.output or
+            (title..(p and (' x'..p.crafts) or ''))
+    end
+    table.sort(purposes)
+    return #purposes>0 and ('For: '..table.concat(purposes,'; ')) or nil
+end
+local sourceWindow=nil
+local sourceWindowItem=nil
+local sourceWindowOpen=false
+local function showItemSource(name)
+    if sourceWindow and sourceWindowItem==name and sourceWindowOpen then
+        sourceWindow:Hide(); sourceWindowOpen=false; return
+    end
+    local data=(CraftersLedgerSources or {})[name]
+    local trade=data and data.trade or 'Unknown'
+    local recipe=name:match('^Recipe:%s*(.+)$')
+    if not data and recipe then
+        for key,group in pairs(CraftersLedgerMasterRecipes or {}) do
+            for _,r in ipairs(type(group)=='table' and group or {}) do
+                if string.lower(tostring(field(r,'name')))==string.lower(recipe) then trade=key:gsub('^Crafting_','') end
+            end
+        end
+    end
+    if sourceWindow then pcall(function() sourceWindow:Destroy() end); sourceWindow=nil end
+    local ref=data and data.reference or ('https://sotawiki.org/sota/'..name:gsub(' ','_'))
+    sourceWindow=UI.Window{id='crafters_ledger_item_source',title='Where to get it',width=620,height=350,onClose=function() sourceWindowOpen=false end,
+        minWidth=540,minHeight=260,escCloses=true,children={
+            UI.Label{text=name,class='heading',style={fontSize=17,whiteSpace='wrap'}},
+            label('Source: '..(data and data.source or 'Unknown — not yet in the reference list.')),
+            label('Vendor type: '..(data and data.vendor or 'Unknown')),
+            label('Crafting trade: '..trade),
+            UI.Label{text=data and data.location or 'Check the wiki for this item. No vendor or location has been verified here.',style={whiteSpace='wrap'}},
+            label(data and 'Reference checked: November 2, 2026. Vendor stock may change.' or 'Suggested wiki page (not verified):'),
+            UI.TextField{text=ref,tooltip='Select and copy this reference URL'},
+        }}
+    sourceWindowItem=name; sourceWindowOpen=true
+    sourceWindow:Show()
+end
+local cartView='By crafted item'
 local cartFilter='To get'
 local cartQuery=''
 local refreshSummary=nil
@@ -465,19 +571,30 @@ refreshCart=function()
         local titles={}
         for title in pairs(C.sources[name] or {}) do titles[#titles+1]=title end
         if #titles==0 then titles={'Other materials'} end
-        for _,title in ipairs(titles) do
-            if included and (string.find(string.lower(name),cartQuery,1,true)
-                or string.find(string.lower(title),cartQuery,1,true)) then
-                groups[title]=groups[title] or {}; groups[title][#groups[title]+1]=name
+        if cartView=='Cart' then
+            local matches=string.find(string.lower(name),cartQuery,1,true)~=nil
+            for _,title in ipairs(titles) do
+                if string.find(string.lower(title),cartQuery,1,true) then matches=true end
+            end
+            if included and matches then
+                groups['Cart']=groups['Cart'] or {}
+                groups['Cart'][#groups['Cart']+1]=name
+            end
+        else
+            for _,title in ipairs(titles) do
+                if included and (string.find(string.lower(name),cartQuery,1,true)
+                    or string.find(string.lower(title),cartQuery,1,true)) then
+                    groups[title]=groups[title] or {}; groups[title][#groups[title]+1]=name
+                end
             end
         end
     end
-    local summary=(have or C.countAcct) and (ready..' of '..total..' materials ready | '..units..' units still to get')
+    local summary=(have or C.countAcct) and (ready..' of '..total..' resources ready | '..units..' still to collect')
         or (total..' materials | Inventory unavailable')
     if el.summary and refreshSummary~=summary then el.summary:SetText(summary); refreshSummary=summary end
     local titles={}; for title in pairs(groups) do titles[#titles+1]=title end; table.sort(titles)
     local pages=math.max(1,math.ceil(#titles/PAGE)); page=math.min(page,pages)
-    local parts={tostring(page),cartFilter}
+    local parts={tostring(page),cartFilter,cartView}
     for _,title in ipairs(titles) do
         table.sort(groups[title])
         local project=C.projects[title]
@@ -489,32 +606,51 @@ refreshCart=function()
         cartStructure=signature; cartCells={}; el.cart:Clear()
         for i=(page-1)*PAGE+1,math.min(page*PAGE,#titles) do
             local title=titles[i]
-            local project=C.projects[title]
-            local content=UI.Column{visible=expanded[title]==true,style={paddingLeft=18,paddingBottom=8,flexShrink=0}}
-            content:Add(row{flexLabel('Material'),label('To get',70),label('Have',65),label('Needed',115),label('',65)})
+            local flat=cartView=='Cart'
+            local project=not flat and C.projects[title] or nil
+            if expanded[title]==nil then expanded[title]=true end
+            local content=UI.Column{visible=flat or expanded[title]==true,style={paddingLeft=18,paddingBottom=8,flexShrink=0}}
+            content:Add(row{flexLabel('Resource'),label('Note',210),label('Required',85),label('Owned',75),label('Still to get',100),label('',130)})
             for _,name in ipairs(groups[title]) do
-                local amount=label('',65); local missing=label('',70)
+                local amount=label('',75); local missing=label('',100)
+                local calculated=next(C.sources[name] or {})~=nil
                 local target
                 local function setNeeded()
                     local n=number(trim(target:GetText()))
                     if not n then
-                        msg('Needed must be a whole number, 1 or more. Use Remove to take '..name..' off the list.')
+                        msg('Error: Required must be a whole number of 1 or more. Use Remove to delete a manual resource.')
                         target:SetText(tostring(C.items[name] or '')); return
                     end
                     if not C.items[name] then return end
                     C.set(name,n); refreshCart()
-                    msg('Needed for '..name..' is now '..n..'.')
+                    msg('Updated required quantity: '..name..' x'..n..'.')
                 end
-                target=UI.TextField{text=tostring(C.items[name] or ''),maxLength=7,style={width=65},
-                    tooltip='Type the amount you need, then press Enter or Set',onSubmit=setNeeded}
+                if calculated then
+                    target=label(tostring(C.items[name] or ''),85)
+                else
+                    target=UI.TextField{text=tostring(C.items[name] or ''),maxLength=7,style={width=85},
+                        tooltip='Total resource quantity required. Owned resources are counted automatically.',onSubmit=setNeeded}
+                end
                 local cell={name=name,target=target,amount=amount,status=missing,lastTarget=C.items[name]}
                 cartCells[#cartCells+1]=cell
                 local sourceCount=0; for _ in pairs(C.sources[name] or {}) do sourceCount=sourceCount+1 end
-                local nameLabel=sourceCount>1 and (name..' (shared total)') or name
-                content:Add(row{flexLabel(nameLabel),missing,amount,target,
-                    UI.Button{text='Set',style={width=46},onClick=setNeeded},
-                    UI.Button{text='Remove',style={width=65},onClick=function() C.remove(name); refreshCart() end}})
+                local nameLabel=not flat and sourceCount>1 and (name..' (shared total)') or name
+                local purpose=resourcePurpose(name)
+                local nameCell=flexLabel(nameLabel)
+                local purposeCell=UI.Label{text=purpose and purpose:gsub('^For:%s*','') or 'Manual resource',
+                    style={width=210,fontSize=13,color='#99BBDD',whiteSpace='wrap',flexShrink=0}}
+                local actions
+                if calculated then
+                    actions=UI.Button{text='ⓘ',tooltip='Source information: click to open or close',style={width=26,height=24},onClick=function() showItemSource(name) end}
+                else
+                    actions=row{UI.Button{text='ⓘ',tooltip='Source information: click to open or close',style={width=26,height=24},onClick=function() showItemSource(name) end},UI.Button{text='Set',style={width=46},onClick=setNeeded},
+                        UI.Button{text='Remove',style={width=76},onClick=function() C.remove(name); refreshCart() end}}
+                end
+                content:Add(row{nameCell,purposeCell,target,amount,missing,actions})
             end
+            if flat then
+                el.cart:Add(content)
+            else
             local toggle
             toggle=UI.Button{text=expanded[title] and '-' or '+',style={width=32},onClick=function()
                 expanded[title]=not expanded[title]
@@ -544,10 +680,13 @@ refreshCart=function()
                 ((project.output or '')~='' and (' | '..project.output) or '')) end
             children[#children+1]=content
             el.cart:Add(UI.Column{style={paddingTop=8,paddingBottom=8,marginBottom=6,flexShrink=0},children=children})
+            end
         end
         if #titles==0 then el.cart:Add(label(total==0 and 'Your list is empty. Add a recipe or materials to begin.'
             or 'No materials match this view. Choose All to see completed entries.')) end
-        el.cartPage:SetText('Page '..page..' / '..pages..' - '..#titles..' entries')
+        el.cartPage:SetText(cartView=='Cart' and
+            ((groups['Cart'] and #groups['Cart'] or 0)..' materials') or
+            ('Page '..page..' / '..pages..' - '..#titles..' entries'))
     end
     for _,cell in ipairs(cartCells) do
         local target=C.items[cell.name]
@@ -677,19 +816,23 @@ local quietRead=false
 local function readRecipes()
     local ok,book=false,nil
     if type(ShroudGetKnownRecipes)=='function' then ok,book=pcall(ShroudGetKnownRecipes) end
-    if not ok or type(book)~='table' or next(book)==nil then
-        ok,book=pcall(ShroudGetRecipeBook)
-    end
     if not ok or type(book)~='table' then if not quietRead then msg('Could not read your recipe book.') end; return end
     recipes={}; detailCache={}; itemIndex=nil; indexJob=nil
     for _,r in pairs(book) do if type(field(r,'name'))=='string' then recipes[#recipes+1]=r end end
     table.sort(recipes,function(a,b) return field(a,'name')<field(b,'name') end)
-    if not quietRead then msg('Read '..#recipes..' recipes. Search by part of the name.') end
+    -- Routine recipe refreshes do not clutter Activity or chat.
 end
 findRecipes=function()
     if #recipes==0 then readRecipes() end
     local search=string.lower(trim(el.search:GetText()))
     matches={}; recipePage=1
+    if search=='' then
+        selected=nil; picks={}
+        if el.matches then el.matches:Clear() end
+        if el.matchPage then el.matchPage:SetText('Search to see recipes') end
+        if el.preview then el.preview:Clear() end
+        return
+    end
     for _,r in ipairs(recipes) do
         if search=='' or string.find(string.lower(field(r,'name')),search,1,true) then matches[#matches+1]=r end
     end
@@ -727,34 +870,391 @@ local function addRecipe(linkOnly)
     C.projects[title]={crafts=total,output=table.concat(results,', '):gsub('[\t\r\n]',' ')}
     C.untracked[title]=nil
     local saved=C.save(); refreshCart()
-    if navigate then navigate('Shopping list') end
+    if navigate then navigate('Cart') end
     msg((linkOnly==true and 'Labeled existing materials for ' or 'Added materials for ')..title..
         (saved and '. Saved.' or '. Saving failed; see chat.'))
+end
+-- Crafting plans use desired finished quantities; recipe details are read one per frame.
+local bulkPlan,bulkJob,bulkReplace=nil,nil,nil
+local bulkFailures={}
+local addBulkPlan
+local requestWantedRecipe
+local previewBulkPlan
+local simplePicked=nil
+local enteredPlanItems={}
+local function splitPlanText(text)
+    text=tostring(text):gsub('(:%s*%d+)%s+','%1;')
+    text=text:gsub('(%d+)%s+[xX]%s+',';%1 x ')
+    return text:gsub('(%d+)%s+×%s+',';%1 x ')
+end
+local function planEntries(text)
+    local entries={}
+    for raw in splitPlanText(text):gmatch('[^;\r\n]+') do
+        raw=trim(raw)
+        if raw~='' then entries[#entries+1]=raw end
+    end
+    return entries
+end
+local function planItem(raw)
+    raw=trim(raw):gsub('^%-%s+','')
+    local name,n=raw:match('^(.-):%s*(%d+)%s*$')
+    if not name then n,name=raw:match('^(%d+)%s+[xX]%s+(.+)$') end
+    name=trim(name); n=number(n)
+    if not valid(name) or not n or name:find(':%s*%d') then return nil end
+    return name,n
+end
+local function planKey(s)
+    return string.lower(trim(s)):gsub('^recipe:%s*','')
+end
+local function resetBulkPlan()
+    bulkPlan=nil; bulkJob=nil; bulkReplace=nil; bulkFailures={}
+    if el.bulkPreview then el.bulkPreview:Clear() end
+    if el.bulkStatus then el.bulkStatus:SetText('Preview the plan before adding it.') end
+end
+local function showEnteredPlanItems()
+    if el.bulkEntered then
+        el.bulkEntered:SetText(#enteredPlanItems>0 and table.concat(enteredPlanItems,'\n') or 'No items entered yet.')
+    end
+end
+local function enterPlanItems()
+    local staged={}
+    for _,raw in ipairs(planEntries(el.bulkInput:GetText())) do
+        local name,n=planItem(raw)
+        if not name then el.bulkStatus:SetText('Invalid entry: '..raw); msg('Error: Invalid plan entry: '..raw..'. Use 2 x Iron Lantern.'); return end
+        staged[#staged+1]=n..' x '..name
+    end
+    if #staged==0 then return end
+    if #enteredPlanItems+#staged>100 then el.bulkStatus:SetText('Enter up to 100 item rows per plan.'); return end
+    resetBulkPlan()
+    for _,line in ipairs(staged) do enteredPlanItems[#enteredPlanItems+1]=line end
+    el.bulkInput:SetText(''); showEnteredPlanItems()
+    el.bulkStatus:SetText('Checking recipes for your entered items...')
+    previewBulkPlan()
+end
+previewBulkPlan=function()
+    resetBulkPlan()
+    local wanted,order={},{}
+    local text=table.concat(enteredPlanItems,'; ')..'; '..tostring(el.bulkInput:GetText())
+    for _,raw in ipairs(planEntries(text)) do
+        local name,n=planItem(raw)
+        if not name then
+            el.bulkStatus:SetText('Invalid entry: '..raw); msg('Error: Invalid plan entry: '..raw..'. Use 2 x Iron Lantern.'); return
+        end
+        local key=planKey(name)
+        if not wanted[key] then wanted[key]={name=name,quantity=0}; order[#order+1]=key end
+        wanted[key].quantity=wanted[key].quantity+n
+    end
+    if #order==0 then el.bulkStatus:SetText('Enter at least one item.'); return end
+    quietRead=true; readRecipes(); quietRead=false
+    local byName={}
+    for _,r in ipairs(recipes) do
+        local key=planKey(field(r,'name'))
+        byName[key]=byName[key] or {}; byName[key][#byName[key]+1]=r
+    end
+    bulkJob={wanted=wanted,order=order,byName=byName,index=1,entries={},errors=0,unresolved={}}
+    el.bulkStatus:SetText('Checking '..#order..' items...')
+end
+local function bulkPlanStep()
+    local job=bulkJob
+    if not job then return end
+    local key=job.order[job.index]
+    if not key then
+        bulkPlan=#job.entries>0 and job.entries or nil
+        bulkFailures=job.unresolved
+        bulkJob=nil
+        if #job.entries>0 and job.autoAdd then addBulkPlan(); return end
+        el.bulkStatus:SetText(job.errors==0 and
+            'Materials are ready. Choose alternatives if needed, then click Add to cart.' or
+            (#job.entries..' items ready to add; '..job.errors..' need attention. See the red messages below and Activity.'))
+        return
+    end
+    local want=job.wanted[key]
+    job.index=job.index+1
+    local function fail(reason,missing)
+        job.errors=job.errors+1
+        job.unresolved[#job.unresolved+1]=want.quantity..' x '..want.name
+        msg('Error: Check '..want.name..' x'..want.quantity..' — '..reason)
+        el.bulkPreview:Add(UI.Label{text=want.name..': '..reason,style={color='#FF6666',whiteSpace='wrap',fontSize=14}})
+        if missing then
+            el.bulkPreview:Add(row{
+                UI.Button{text='Wishlist',onClick=function() requestWantedRecipe(want.name,false) end},
+                UI.Button{text='Add to cart',onClick=function() requestWantedRecipe(want.name,true) end},
+            })
+        end
+    end
+    local candidates=job.byName[key] or {}
+    if #candidates~=1 then
+        if #candidates==0 then
+            local found=false
+            for _,group in pairs(CraftersLedgerMasterRecipes or {}) do
+                for _,r in ipairs(list(group)) do
+                    if planKey(field(r,'name'))==key then found=true; break end
+                end
+                if found then break end
+            end
+            fail(found and 'Recipe not learned. Learn it or add the recipe to your cart.' or
+                'Recipe not found. Check the name or learn the recipe.',found)
+        else fail('More than one recipe matches. Choose it from the recipe search.') end
+        return
+    end
+    local r=detail(candidates[1])
+    local results=list(field(r,'results'))
+    local output=nil
+    for _,result in ipairs(results) do
+        if planKey(field(result,'name'))==key then
+            if output then fail('Output is ambiguous. Use Recipes.'); return end
+            output=result
+        end
+    end
+    if not output and #results==1 then output=results[1] end
+    local yield=output and number(field(output,'quantity'))
+    if not yield then fail('Finished-item yield unavailable. Use Recipes.'); return end
+    local crafts=math.ceil(want.quantity/yield)
+    local entry={title=tostring(field(r,'name')),sourceName=want.name,requested=want.quantity,crafts=crafts,output={},rows={}}
+    local children={label(want.name..' — requested '..want.quantity..', makes '..(crafts*yield)..' ('..crafts..' crafts)')}
+    for _,result in ipairs(results) do
+        local q=number(field(result,'quantity'))
+        if q then entry.output[#entry.output+1]=(q*crafts)..' x '..tostring(field(result,'name')) end
+    end
+    for _,ing in ipairs(list(field(r,'ingredients'))) do
+        if field(ing,'optional')~=true then
+            local q=number(field(ing,'quantity'))
+            local tool=field(ing,'tool')==true
+            if not q then fail('Ingredient quantities unavailable.'); return end
+            local options={}
+            if field(ing,'group')==true then
+                for _,choice in ipairs(list(field(ing,'choices'))) do
+                    local name=field(choice,'name')
+                    if valid(name) then options[#options+1]=name end
+                end
+            elseif valid(field(ing,'name')) then options[1]=field(ing,'name') end
+            if #options==0 then fail('Ingredient names or choices unavailable.'); return end
+            local material={name=options[1],quantity=q*(tool and 1 or crafts),tool=tool}
+            entry.rows[#entry.rows+1]=material
+            if #options>1 then
+                children[#children+1]=row{label('Need '..material.quantity..(tool and ' (tool)' or ''),145),
+                    UI.Dropdown{choices=options,value=options[1],style={flexGrow=1},
+                        onChange=function(_,name) material.name=name end}}
+            else
+                children[#children+1]=label('  '..material.name..': '..material.quantity..(tool and ' (tool, reused)' or ''))
+            end
+        end
+    end
+    if #entry.rows==0 then fail('Required ingredients unavailable.'); return end
+    job.entries[#job.entries+1]=entry
+    el.bulkPreview:Add(UI.Column{style={paddingBottom=10,flexShrink=0},children=children})
+end
+local function convertExistingItems()
+    readRecipes()
+    local known={}
+    for _,r in ipairs(recipes) do known[planKey(field(r,'name'))]=true end
+    local lines,snapshot={},{}
+    for name,n in pairs(C.items) do
+        if not next(C.sources[name] or {}) and known[planKey(name)] then
+            lines[#lines+1]=name..': '..n; snapshot[name]=n
+        end
+    end
+    table.sort(lines)
+    if #lines==0 then msg('No ungrouped items match learned recipe names. Use Crafting plan to enter your items.'); return end
+    enteredPlanItems={}; showEnteredPlanItems()
+    el.bulkInput:SetText(table.concat(lines,'; '))
+    previewBulkPlan()
+    if bulkJob then bulkReplace=snapshot end
+    if navigate then navigate('Crafting plan') end
+    msg('Review this conversion. Add crafting plan will replace these finished-item entries with their resources.')
+end
+addBulkPlan=function()
+    if bulkJob or not bulkPlan then msg('Preview a valid crafting plan first. Nothing added.'); return end
+    if bulkReplace then
+        for name,n in pairs(bulkReplace) do
+            if C.items[name]~=n or next(C.sources[name] or {}) then
+                msg('The list changed. Preview the conversion again. Nothing added.'); return
+            end
+        end
+        for _,entry in ipairs(bulkPlan) do
+            local name=entry.sourceName
+            if bulkReplace[name] then C.items[name]=nil; C.sources[name]=nil; C.amounts[name]=nil end
+        end
+    end
+    for _,entry in ipairs(bulkPlan) do
+        for _,r in ipairs(entry.rows) do
+            C.items[r.name]=r.tool and math.max(C.items[r.name] or 0,r.quantity) or
+                (C.items[r.name] or 0)+r.quantity
+            C.sources[r.name]=C.sources[r.name] or {}; C.sources[r.name][entry.title]=true
+            if not r.tool then
+                C.amounts[r.name]=C.amounts[r.name] or {}
+                C.amounts[r.name][entry.title]=(C.amounts[r.name][entry.title] or 0)+r.quantity
+            end
+        end
+        local old=C.projects[entry.title]
+        C.projects[entry.title]={crafts=(old and old.crafts or 0)+entry.crafts,
+            output=table.concat(entry.output,', '):gsub('[\t\r\n]',' ')}
+        -- Existing recipe groups can include earlier batches: avoid showing a last-batch-only output.
+        if old then C.projects[entry.title].output='' end
+        C.untracked[entry.title]=nil
+    end
+    local activityDetails={}
+    for _,entry in ipairs(bulkPlan) do
+        activityDetails[#activityDetails+1]='- '..(#entry.output>0 and table.concat(entry.output,', ') or entry.title)
+    end
+    local remaining=bulkFailures
+    local addedCount=#bulkPlan
+    local saved=C.save()
+    resetBulkPlan()
+    el.bulkInput:SetText('')
+    enteredPlanItems=remaining
+    showEnteredPlanItems(); refreshCart()
+    msg(saved and ('Added '..addedCount..' crafted items to the cart.') or
+        'Plan added. Saving failed; see chat.',activityDetails)
+    if #remaining>0 then
+        el.bulkStatus:SetText('Added '..addedCount..' items. '..#remaining..' still need attention and remain in your draft. See Activity.')
+        msg('Error: '..#remaining..' items were not added. Check recipes; these remain in your draft.',remaining)
+    elseif navigate then navigate('Cart') end
+end
+
+local function searchSimpleRecipes()
+    if not el.simpleMatches then return end
+    quietRead=true; readRecipes(); quietRead=false
+    el.simpleMatches:Clear()
+    local query=planKey(el.simpleSearch:GetText())
+    local shown,total=0,0
+    for _,r in ipairs(recipes) do
+        local name=tostring(field(r,'name'))
+        if query~='' and string.find(planKey(name),query,1,true) then
+            total=total+1
+            if shown<8 then
+                shown=shown+1
+                local chosen=name
+                el.simpleMatches:Add(UI.Button{text=name,style={height=28,flexGrow=0,flexShrink=0},onClick=function()
+                    simplePicked=chosen
+                    el.simpleSelected:SetText('Making: '..chosen)
+                    enteredPlanItems={}; el.bulkInput:SetText((number(el.simpleQuantity:GetText()) or 1)..' x '..chosen)
+                    previewBulkPlan()
+                end})
+            end
+        end
+    end
+    if query=='' then el.simpleMatches:Add(label('Search for an item, then choose it below.'))
+    elseif total==0 then el.simpleMatches:Add(label('No learned recipe matches. Learn the recipe first, or check its name in Recipes.'))
+    elseif total>8 then el.simpleMatches:Add(label('Type more of the name to narrow the results.')) end
+    if el.simpleResultsScroll then
+        el.simpleResultsScroll:SetStyle{height=math.min(180,math.max(28,shown*30+(total>8 and 24 or 0))),flexGrow=0,flexShrink=0}
+    end
+end
+local function addSimpleItem()
+    if bulkPlan then addBulkPlan(); return end
+    if bulkJob then bulkJob.autoAdd=true; return end
+    if not simplePicked then msg('Choose an item from the search results first.'); return end
+    local n=number(el.simpleQuantity:GetText())
+    if not n then msg('Enter a quantity of 1 or more.'); return end
+    enteredPlanItems={}; el.bulkInput:SetText(n..' x '..simplePicked)
+    previewBulkPlan()
+    if bulkJob then bulkJob.autoAdd=true end
+end
+local function addPastedPlan()
+    previewBulkPlan()
+    if bulkJob then bulkJob.autoAdd=true end
 end
 local function addManual()
     local name=trim(el.item:GetText())
     local n=number(el.amount:GetText())
     if not valid(name) or not n then msg('Enter an item name and a positive whole quantity.'); return end
     C.add(name,n); refreshCart()
-    msg('Added '..name..' to your shopping list.')
+    msg('Added '..name..' to your cart.')
 end
-local function importList()
-    local text=el.materials:GetText()
-    local staged={}
-    for entry in tostring(text):gmatch('[^;\r\n]+') do
-        local name,n=entry:match('^%s*(.-)%s*=%s*(%d+)%s*$')
-        name=trim(name); n=number(n)
-        if not valid(name) or not n then msg('Use Item Name=quantity; Item Name=quantity. Nothing imported.'); return end
-        staged[name]=(staged[name] or 0)+n
+-- Parse everything before changing the cart: a bad line never imports a partial list.
+local function parseMaterialImport(text)
+    local totals,groups={},{}
+    local current=nil
+    local function fail(line) return nil,nil,'Check this import line: '..line end
+    -- The game's single-line field can replace pasted newlines with spaces.
+    -- Recover our readable headings and bullet rows before parsing entries.
+    text=tostring(text)
+    text=text:gsub('(%s+—%s*[Mm]ake%s+%d+)%s*','%1;')
+    text=text:gsub('(%s+–%s*[Mm]ake%s+%d+)%s*','%1;')
+    text=text:gsub('(%s+%-%s*[Mm]ake%s+%d+)%s*','%1;')
+    text=text:gsub('%s+%-%s+([^;\r\n]-:%s*%d+)',';%1')
+    text=text:gsub('(:%s*%d+)%s+','%1;')
+    for raw in tostring(text):gmatch('[^;\r\n]+') do
+        local line=trim(raw)
+        if line~='' then
+            local title,count=line:match('^(.-)%s+—%s*[Mm]ake%s+(%d+)%s*$')
+            if not title then title,count=line:match('^(.-)%s+–%s*[Mm]ake%s+(%d+)%s*$') end
+            if not title then title,count=line:match('^(.-)%s+%-%s*[Mm]ake%s+(%d+)%s*$') end
+            if title then
+                title=trim(title); count=number(count)
+                if not valid(title) or not count then return fail(line) end
+                if groups[title] then return nil,nil,'Use one heading per item: '..title end
+                current={crafts=count,materials={}}
+                groups[title]=current
+            else
+                line=line:gsub('^%-%s+','')
+                local name,n=line:match('^%s*(.-)%s*=%s*(%d+)%s*$')
+                if not name then name,n=line:match('^%s*(.-)%s*:%s*(%d+)%s*$') end
+                name=trim(name); n=number(n)
+                if not valid(name) or not n then return fail(raw) end
+                if name:find('=') or name:find(':%s*%d') or name:find('%s[Mm]ake%s+%d') then return fail(raw) end
+                totals[name]=(totals[name] or 0)+n
+                if current then current.materials[name]=(current.materials[name] or 0)+n end
+            end
+        end
     end
-    if next(staged)==nil then msg('Enter a material list first.'); return end
-    for name,n in pairs(staged) do C.items[name]=(C.items[name] or 0)+n end
+    if not next(totals) then return nil,nil,'Enter a material list first.' end
+    for title,group in pairs(groups) do
+        if not next(group.materials) then return nil,nil,'No materials listed for '..title end
+    end
+    return totals,groups
+end
+local function importList(groupExisting)
+    local totals,groups,err=parseMaterialImport(el.materials:GetText())
+    if not totals then msg(err..' Nothing imported.'); return end
+    if groupExisting==true then
+        if not next(groups) then msg('Include item headings to group existing materials.'); return end
+        -- Only allocate quantities that are not already assigned to another recipe.
+        for title in pairs(groups) do
+            if C.projects[title] then msg('Already grouped: '..title..'. Nothing changed.'); return end
+        end
+        for name,n in pairs(totals) do
+            local grouped=0
+            for _,group in pairs(groups) do grouped=grouped+(group.materials[name] or 0) end
+            if grouped~=n then msg('Put every material under an item heading. Nothing changed.'); return end
+            local allocated=0
+            for title in pairs(C.sources[name] or {}) do
+                local share=C.amounts[name] and C.amounts[name][title]
+                if not share then msg('Existing recipe allocation is unknown for '..name..'. Nothing changed.'); return end
+                allocated=allocated+share
+            end
+            if (C.items[name] or 0)-allocated~=n then
+                msg('Ungrouped '..name..' must match the pasted total ('..n..'). Nothing changed.'); return
+            end
+        end
+    else
+        for name,n in pairs(totals) do C.items[name]=(C.items[name] or 0)+n end
+    end
+    for title,group in pairs(groups) do
+        for name,n in pairs(group.materials) do
+            C.sources[name]=C.sources[name] or {}; C.sources[name][title]=true
+            C.amounts[name]=C.amounts[name] or {}
+            C.amounts[name][title]=(C.amounts[name][title] or 0)+n
+        end
+        local old=C.projects[title]
+        local crafts=(old and old.crafts or 0)+group.crafts
+        C.projects[title]={crafts=crafts,output=crafts..' x '..title}
+        C.untracked[title]=nil
+    end
     local saved=C.save(); refreshCart()
-    if navigate then navigate('Shopping list') end
-    msg('Material list added.'..(saved and ' Cart saved.' or ' Saving failed; see chat.'))
+    if navigate then navigate('Cart') end
+    local activityDetails={}
+    for title,group in pairs(groups) do activityDetails[#activityDetails+1]='- '..title..' x'..group.crafts end
+    if #activityDetails==0 then
+        for name,n in pairs(totals) do activityDetails[#activityDetails+1]='- '..name..': '..n end
+    end
+    table.sort(activityDetails)
+    msg((groupExisting==true and 'Existing materials grouped.' or 'Material list added.')..
+        (saved and ' Cart saved.' or ' Saving failed; see chat.'),activityDetails)
 end
 
--- Find items: every item your known recipes make or use, plus your shopping list, searchable by part
+-- Find items: every item your known recipes make or use, plus your cart, searchable by part
 -- of its name. Built in small timed steps (the game stops an add-on that takes too long in one frame).
 local itemIndex=nil          -- lower name -> {name,makes={recipe=true},uses={recipe=true}}
 local indexJob=nil
@@ -768,6 +1268,163 @@ local STEP_SECONDS=0.004     -- time spent per frame building the item list
 local function clock()
     if type(os)=='table' and type(os.clock)=='function' then
         local ok,v=pcall(os.clock); if ok and type(v)=='number' then return v end
+    end
+end
+
+-- Missing recipes use names and categories only; no slow recipe-detail calls.
+local missingJob,missingRows,missingCounts,missingError=nil,{},{},nil
+local missingPage,missingTotal,missingKronic=1,0,false
+local missingQuery,missingView='', 'Missing recipes'
+local missingKnown={}
+local MISSING_PAGE=12
+local wishlistWin,wishlistRows,wishlistSearch=nil,nil,''
+local refreshWishlist=nil
+local function wantRecipe(r)
+    C.wanted[r.name]={name=r.name,key=r.key,level=r.level}
+    C.wishes['Recipe: '..r.name]=C.wishes['Recipe: '..r.name] or 1
+    local saved=C.save()
+    msg(saved and ('Added recipe to wanted list: '..r.name) or 'Recipe marked wanted. Saving failed; see chat.')
+end
+local function shopForRecipe(r)
+    C.wanted[r.name]={name=r.name,key=r.key,level=r.level}
+    local name='Recipe: '..r.name
+    C.wishes[name]=C.wishes[name] or 1
+    C.items[name]=math.max(1,C.items[name] or 0)
+    C.sources[name]=C.sources[name] or {}; C.sources[name]['Recipes wanted']=true
+    C.amounts[name]=C.amounts[name] or {}; C.amounts[name]['Recipes wanted']=C.items[name]
+    C.untracked['Recipes wanted']=nil
+    local saved=C.save(); refreshCart()
+    msg(saved and ('Added to cart: '..name) or 'Recipe added. Saving failed; see chat.')
+end
+requestWantedRecipe=function(name,shop)
+    for key,group in pairs(CraftersLedgerMasterRecipes or {}) do
+        for _,r in ipairs(list(group)) do
+            if planKey(field(r,'name'))==planKey(name) then
+                local recipe={name=field(r,'name'),key=key,level=tonumber(field(r,'level'))}
+                if shop then shopForRecipe(recipe) else wantRecipe(recipe) end
+                return
+            end
+        end
+    end
+    msg('Recipe name not found in the reference list. Check Missing Recipes before adding it.')
+end
+local function skillName(key) return (key:gsub('^Crafting_','')) end
+local function renderMissing()
+    if not el.missingRows then return end
+    el.missingRows:Clear()
+    if missingQuery=='' and missingView=='Missing recipes' then
+        el.missingStatus:SetText('Search to see missing recipes.')
+        el.missingPage:SetText('')
+        return
+    end
+    if missingJob then return end
+    if missingError and missingView=='Missing recipes' then el.missingStatus:SetText(missingError); return end
+    local rows={}
+    local source=missingView=='Recipes wanted' and C.wanted or missingRows
+    for _,r in pairs(source) do
+        if string.find(string.lower(r.name),missingQuery,1,true) then rows[#rows+1]=r end
+    end
+    table.sort(rows,function(a,b)
+        if a.key~=b.key then return a.key<b.key end
+        return string.lower(a.name)<string.lower(b.name)
+    end)
+    local pages=math.max(1,math.ceil(#rows/MISSING_PAGE))
+    missingPage=math.max(1,math.min(missingPage,pages))
+    el.missingPage:SetText('Page '..missingPage..' / '..pages)
+    el.missingStatus:SetText(#rows..' matching '..string.lower(missingView)..
+        (missingView=='Missing recipes' and (' ('..missingTotal..' total missing)') or ''))
+    local lastKey
+    for i=(missingPage-1)*MISSING_PAGE+1,math.min(missingPage*MISSING_PAGE,#rows) do
+        local r=rows[i]
+        if r.key~=lastKey then
+            el.missingRows:Add(UI.Label{text=skillName(r.key),class='heading',style={fontSize=16,marginTop=6}})
+            lastKey=r.key
+        end
+        local learned=(missingKnown[r.key] or {})[string.lower(trim(r.name))]==true
+        local actions={label(r.level and ('Level '..r.level) or 'Level unknown',115),
+            flexLabel(r.name..(learned and ' (learned)' or ''))}
+        if missingView=='Recipes wanted' then
+            actions[#actions+1]=UI.Button{text='Remove wanted',onClick=function()
+                C.wanted[r.name]=nil; C.save(); renderMissing(); msg('Removed from recipes wanted: '..r.name)
+            end}
+        elseif not C.wanted[r.name] then
+            actions[#actions+1]=UI.Button{text='Wishlist',onClick=function() wantRecipe(r); renderMissing() end}
+        else actions[#actions+1]=label('Wanted',80) end
+        actions[#actions+1]=UI.Button{text='Add to cart',onClick=function() shopForRecipe(r); renderMissing() end}
+        el.missingRows:Add(row(actions))
+    end
+    if #rows==0 then el.missingRows:Add(label(missingView=='Recipes wanted' and
+        'No wanted recipes match. Find a missing recipe and click Want recipe.' or
+        'No missing recipes match. This checks only the bundled recipe list.')) end
+end
+local function startMissing()
+    missingPage=1; missingRows={}; missingCounts={}; missingTotal=0; missingError=nil
+    local onlyKronic=missingKronic
+    missingJob=coroutine.create(function()
+        if type(CraftersLedgerMasterRecipes)~='table' then error('Master recipe list is unavailable.') end
+        if type(ShroudGetKnownRecipes)~='function' then error('Known recipes API is unavailable.') end
+        local ok,book=pcall(ShroudGetKnownRecipes)
+        if not ok or type(book)~='table' then error('Could not read known recipes. Try Refresh recipes after login.') end
+        local known,work={},0
+        local function pause()
+            work=work+1
+            if work>=40 then work=0; coroutine.yield() end
+        end
+        for _,r in pairs(book) do
+            local key,name=field(r,'categoryKey'),field(r,'name')
+            if type(key)=='string' and type(name)=='string' and trim(name)~='' then
+                known[key]=known[key] or {}; known[key][string.lower(trim(name))]=true
+            end
+            pause()
+        end
+        local keys,rows,counts,total={},{},{},0
+        for key in pairs(CraftersLedgerMasterRecipes) do
+            if type(key)=='string' then keys[#keys+1]=key end
+            pause()
+        end
+        table.sort(keys)
+        for _,key in ipairs(keys) do
+            local group,seen={},{}
+            for _,r in pairs(list(CraftersLedgerMasterRecipes[key])) do
+                local name=field(r,'name')
+                if type(name)=='string' then
+                    name=trim(name)
+                    local normalized=string.lower(name)
+                    if name~='' and not seen[normalized] and not (known[key] or {})[normalized]
+                        and (not onlyKronic or field(r,'kronic')==true) then
+                        seen[normalized]=true
+                        group[#group+1]={key=key,name=name,level=tonumber(field(r,'level'))}
+                    end
+                end
+                pause()
+            end
+            table.sort(group,function(a,b)
+                local al,bl=a.level or math.huge,b.level or math.huge
+                if al~=bl then return al<bl end
+                return string.lower(a.name)<string.lower(b.name)
+            end)
+            counts[#counts+1]={key=key,count=#group}; total=total+#group
+            for _,r in ipairs(group) do r.count=#group; rows[#rows+1]=r; pause() end
+            coroutine.yield()
+        end
+        missingRows=rows; missingCounts=counts; missingTotal=total; missingKnown=known
+    end)
+    if el.missingStatus then el.missingStatus:SetText('Checking known recipes against the master list...') end
+    renderMissing()
+end
+local function missingStep()
+    if not missingJob then return end
+    local start=clock()
+    for _=1,5 do
+        local ok,err=coroutine.resume(missingJob)
+        if not ok then
+            missingJob=nil
+            missingError='Missing recipes: '..tostring(err); renderMissing()
+            return
+        end
+        if coroutine.status(missingJob)=='dead' then missingJob=nil; renderMissing(); return end
+        local now=clock()
+        if start and now and now-start>=STEP_SECONDS then return end
     end
 end
 local function indexAdd(items,name,kind,title)
@@ -853,7 +1510,7 @@ local function findItems()
     if el.itemStatus then
         local n=0; for _ in pairs(itemIndex) do n=n+1 end
         el.itemStatus:SetText(itemQuery=='' and ('Type a name or words from it to search all '..n..' items.')
-            or ('Searched '..n..' items, your bag and your shopping list. For anything else, type its full name.'))
+            or ('Searched '..n..' items, your bag and your cart. For anything else, type its full name.'))
     end
     -- exact name first, then names starting with the word, then the rest A-Z
     local function rank(f)
@@ -1090,7 +1747,7 @@ renderItems=function()
                 where:SetVisible(itemOpen[k]); whereButton:SetText(itemOpen[k] and '-' or '+')
                 fillWhere(cell); cell.version=ownedVersion
             end}
-        local add=UI.Button{text='Add',style={width=55},tooltip='Add the amount above to what your shopping list needs',
+        local add=UI.Button{text='Add',style={width=55},tooltip='Add the amount above to what your cart needs',
             onClick=function()
                 local n=number(el.itemAmount:GetText())
                 if not n then msg('Amount must be a whole number, 1 or more.'); return end
@@ -1105,7 +1762,7 @@ renderItems=function()
             about='Made by: '..shortList(makes,2)..' | Used in '..#uses..(#uses==1 and ' recipe' or ' recipes')
                 ..(#uses>0 and (': '..shortList(uses,3)) or '')
         elseif m.typed then about='Not in your recipes or bag. Looking it up by exact name.'
-        elseif C.items[name] then about='On your shopping list'
+        elseif C.items[name] then about='On your cart'
         else about='Not used in your recipes' end
         el.itemResults:Add(UI.Column{style={paddingTop=6,paddingBottom=6,flexShrink=0},children={
             row{whereButton,UI.Label{text=name,class='heading',style={flexGrow=1,flexShrink=1,whiteSpace='wrap',fontSize=15}},
@@ -1133,12 +1790,12 @@ refreshItems=function()
                 text=text..' (bag '..math.max(inv[string.lower(cell.name)] or 0,o.carried or 0)..')'
             end
         end
-        -- on the shopping list: what the list needs and what is still to get
+        -- on the cart: what the list needs and what is still to get
         local color='@text'
         if need then
             local get=n and math.max(0,need-n)
             text=text..' | Need '..need..' | '..(get==nil and 'To get ...' or (get==0 and 'Ready' or ('To get '..get)))
-            color=get==0 and '@green' or (get and '@red' or '@text')
+            color=get==0 and '@green' or (get and '@red' or '#C9D5DF')
         end
         if cell.lastText~=text then cell.have:SetText(text); cell.lastText=text end
         if cell.lastColor~=color then pcall(function() cell.have:SetStyle{color=color} end); cell.lastColor=color end
@@ -1148,15 +1805,20 @@ refreshItems=function()
     end
 end
 
--- The tracker: the shopping list on screen like the game's quest list. A compact window (Lua API 19):
+-- The tracker: the cart on screen like the game's quest list. A compact window (Lua API 19):
 -- its title bar only shows while the pointer is over it, so it reads like a see-through list, but it
 -- can be stretched from any edge and faded like any window (right-click it for opacity). Recipe names
 -- are headings with what you still need under them; X takes a recipe off the tracker (it stays on the
--- shopping list), like untracking a quest. Built again only when the lines change; counts update in place.
+-- cart), like untracking a quest. Built again only when the lines change; counts update in place.
 local tracker=nil            -- {win,box,lines={name->label},signature,visible}
 local TRACK_MAX_ROWS=60      -- headings + materials shown; past that a "more" line (element limits)
-local SHADES={['None']=0,['Light']=25,['Medium']=45,['Dark']=65}
-local SHADE_NAMES={'None','Light','Medium','Dark'}
+-- Upgrade the old Dark setting and default to a nearly opaque panel.
+if C.tracker.shade==65 then C.tracker.shade=90 end
+if not C.minimalTracker then
+    C.trackFilter='Still needed'; C.trackView='Resource list'; C.minimalTracker=true; C.save()
+end
+local SHADES={['None']=0,['Light']=25,['Medium']=60,['Dark']=90,['Solid']=100}
+local SHADE_NAMES={'None','Light','Medium','Dark','Solid'}
 local function shadeColor(pct)
     if pct<=0 then return '#00000000' end
     return string.format('#000000%02x',math.floor(math.min(pct,100)*255/100+0.5))
@@ -1174,8 +1836,10 @@ local function trackerGroups()
         total=total+1
         local n=haveOf(name,inv)
         local missing=n and math.max(0,target-n)
-        if missing==nil or missing>0 then
-            left=left+1
+        if missing==nil or missing>0 then left=left+1 end
+        local include=C.trackFilter=='All resources' or (C.trackFilter=='Ready' and missing==0) or
+            (C.trackFilter=='Still needed' and (missing==nil or missing>0))
+        if include then
             local titles={}
             for title in pairs(C.sources[name] or {}) do titles[#titles+1]=title end
             if #titles==0 then titles={'Other materials'} end
@@ -1187,6 +1851,16 @@ local function trackerGroups()
                 end
             end
         end
+    end
+    if C.trackView=='Resource list' then
+        local all,seen={},{}
+        for _,title in ipairs(order) do
+            for _,m in ipairs(groups[title]) do
+                if not seen[m.name] then all[#all+1]=m; seen[m.name]=true end
+            end
+        end
+        groups={}; order={}
+        if #all>0 then groups.Resources=all; order={'Resources'} end
     end
     table.sort(order,function(a,b)
         if a=='Other materials' then return false elseif b=='Other materials' then return true end
@@ -1211,45 +1885,59 @@ local function saveTrackerPlace()
 end
 local saveTrackerPosition=saveTrackerPlace
 local untrackRecipe
-local function itemText(m) return m.name..'  '..(m.have and tostring(m.have) or '...')..' / '..m.need end
+local function itemText(m)
+    local left=m.have and math.max(0,m.need-m.have)
+    if left==nil then return m.name..' ...' end
+    if left==0 then return m.name..' - ready' end
+    return m.name..' x'..left
+end
 local function fillTracker(groups,order,total,left,hidden)
     local box=tracker.box
     box:Clear(); tracker.lines={}
     local rows=0
-    if total==0 then box:Add(UI.Label{text='Shopping list is empty',style={fontSize=13,whiteSpace='wrap'}})
-    elseif left==0 then box:Add(UI.Label{text='Everything on the list is ready',style={fontSize=13,color='@green'}}) end
+    if total==0 then box:Add(UI.Label{text='Cart is empty',style={whiteSpace='wrap'}})
+    elseif #order==0 then box:Add(UI.Label{text=C.trackFilter=='Ready' and 'No resources are ready yet.' or
+        (hidden>0 and 'Tracked items are hidden. Use Track all.' or 'Nothing left to collect.'),style={color='@green',whiteSpace='wrap'}}) end
     for _,title in ipairs(order) do
         if rows>=TRACK_MAX_ROWS then break end
         local project=C.projects[title]
-        box:Add(UI.Row{style={alignItems='center',marginTop=4,flexShrink=0},children={
-            UI.Label{text=title..(project and (' x'..project.crafts) or ''),
-                style={flexGrow=1,flexShrink=1,whiteSpace='wrap',fontSize=14,color='@gold'}},
-            UI.Button{text='x',style={width=24,height=22,fontSize=12},
-                tooltip='Take '..title..' off the tracker (it stays on your shopping list)',
-                onClick=function() untrackRecipe(title) end}}})
+        local header={
+            UI.Label{text=project and ((project.output or '')~='' and project.output or (title..' x'..project.crafts)) or (title=='Resources' and 'Shopping list' or title),
+                style={flexGrow=1,flexShrink=1,whiteSpace='wrap',color='@gold'}},
+            UI.Button{text='x',style={width=24,height=22,},
+                tooltip='Take '..title..' off the tracker (it stays on your cart)',
+                onClick=function() untrackRecipe(title) end}}
+        if C.trackView=='Resource list' then table.remove(header) end
+        box:Add(UI.Row{style={alignItems='center',marginTop=4,flexShrink=0},children=header})
         rows=rows+1
         for _,m in ipairs(groups[title]) do
             if rows>=TRACK_MAX_ROWS then break end
-            local e=UI.Label{text=itemText(m),style={fontSize=13,whiteSpace='wrap',paddingLeft=14,flexShrink=0}}
+            local e=UI.Label{text=itemText(m),style={whiteSpace='wrap',paddingLeft=14,flexShrink=0}}
             tracker.lines[#tracker.lines+1]={el=e,name=m.name,title=title,text=itemText(m)}
-            box:Add(e); rows=rows+1
+            local itemName=m.name
+            box:Add(UI.Row{style={alignItems='center',flexShrink=0},children={
+                UI.Column{style={flexGrow=1,flexShrink=1},children={e}},
+                UI.Button{text='ⓘ',tooltip='Source information: click to open or close',style={width=26,height=24},
+                    onClick=function() showItemSource(itemName) end},
+            }})
+            rows=rows+1
         end
     end
     local more=0
     for _,title in ipairs(order) do more=more+1+#groups[title] end
-    if more>rows then box:Add(UI.Label{text='...and more. Open /ledger to see everything.',style={fontSize=12}}) end
+    if more>rows then box:Add(UI.Label{text='...and more. Open /ledger to see everything.',style={}}) end
     if hidden>0 then
-        box:Add(UI.Label{text=hidden..' hidden from the tracker. Shopping list > Track all to bring them back.',
-            style={fontSize=11,whiteSpace='wrap',marginTop=6}})
+        box:Add(UI.Label{text=hidden..' hidden from the tracker. Cart > Track all to bring them back.',
+            style={whiteSpace='wrap',marginTop=6}})
     end
 end
 local function refreshTracker()
     if not trackerShown() then return end
     local groups,order,total,left,hidden=trackerGroups()
-    local parts={tostring(total==0),tostring(left==0),tostring(hidden)}
+    local parts={tostring(total==0),tostring(left==0),tostring(hidden),C.trackFilter,C.trackView}
     for _,title in ipairs(order) do
         local project=C.projects[title]
-        parts[#parts+1]=title..'|'..(project and project.crafts or '')
+        parts[#parts+1]=title..'|'..(project and (project.crafts..'|'..(project.output or '')) or '')
         for _,m in ipairs(groups[title]) do parts[#parts+1]=m.name end
     end
     local signature=table.concat(parts,'\n')
@@ -1269,20 +1957,25 @@ local function refreshTracker()
         end
     end
 end
+local function setTrackerOption(key,value)
+    C[key]=value; C.save()
+    if tracker then tracker.signature=nil; refreshTracker() end
+end
 local function buildTracker()
     local t=C.tracker
     local box=UI.Column{style={paddingLeft=8,paddingRight=8,paddingTop=2,paddingBottom=6,flexShrink=0,
-        backgroundColor=shadeColor(t.shade),borderRadius=3}}
+        borderRadius=3}}
+    local scroll=UI.Scroll{id='ledger_tracker_scroll',style={flexGrow=1},children={box}}
     local win2=UI.Window{id='crafters_ledger_tracker_win',title='Shopping list',compact=true,
-        width=t.w or 300,height=t.h or 320,minWidth=170,minHeight=80,
+        width=math.max(t.w or 300,300),height=t.h or 320,minWidth=300,minHeight=120,
         x=t.x or 1480,y=t.y or 240,escCloses=false,
         onClose=function()
             if tracker then tracker.visible=false end
             C.tracker.shown=false; C.save()
         end,
-        style={paddingTop=2,paddingBottom=2},
-        children={UI.Scroll{id='ledger_tracker_scroll',style={flexGrow=1},children={box}}}}
-    tracker={win=win2,box=box,lines={},signature=nil,visible=true}
+        style={paddingTop=2,paddingBottom=2,backgroundColor=shadeColor(t.shade)},
+        children={scroll}}
+    tracker={win=win2,box=box,scroll=scroll,lines={},signature=nil,visible=true}
 end
 local function setTracker(show)
     C.tracker.shown=show==true
@@ -1308,14 +2001,69 @@ local function trackAll()
     C.untracked={}; C.save()
     if tracker then tracker.signature=nil end
     refreshTracker()
-    msg('Every recipe on your shopping list is back on the tracker.')
+    msg('Every recipe on your cart is back on the tracker.')
 end
 function C.tracker_toggle() trackerToggleRequested=true end
 local function setShade(pct)
     C.tracker.shade=pct; C.save()
-    if tracker then pcall(function() tracker.box:SetStyle{backgroundColor=shadeColor(pct)} end) end
+    if tracker then
+        pcall(function() tracker.win:SetStyle{backgroundColor=shadeColor(pct)} end)
+    end
+end
+local function openWishlist()
+    if wishlistWin then refreshWishlist(); wishlistWin:Show(); return end
+    for name in pairs(C.wanted) do C.wishes['Recipe: '..name]=C.wishes['Recipe: '..name] or 1 end
+    wishlistRows=UI.Column{style={flexShrink=0}}
+    local itemInput=UI.TextField{text='',placeholder='Item name, recipe, pattern...',style={flexGrow=1},maxLength=160}
+    local quantityInput=UI.TextField{text='1',style={width=65},maxLength=5}
+    refreshWishlist=function()
+        wishlistRows:Clear()
+        local names={}
+        for name in pairs(C.wishes) do
+            if string.find(string.lower(name),wishlistSearch,1,true) then names[#names+1]=name end
+        end
+        table.sort(names)
+        local shown=0
+        for _,name in ipairs(names) do
+            if shown>=30 then break end
+            shown=shown+1
+            local item=name
+            wishlistRows:Add(row{flexLabel(item),label('x'..C.wishes[item],50),
+                UI.Button{text='ⓘ',tooltip='Source information: click to open or close',style={width=26,height=24},onClick=function() showItemSource(item) end},
+                UI.Button{text='Add to cart',onClick=function()
+                    C.items[item]=math.max(C.items[item] or 0,C.wishes[item])
+                    local saved=C.save(); refreshCart()
+                    msg(saved and ('Added to cart: '..item..' x'..C.wishes[item]) or 'Item added. Saving failed; see chat.')
+                end},
+                UI.Button{text='Remove',onClick=function()
+                    C.wishes[item]=nil
+                    local recipeName=item:match('^Recipe:%s*(.+)$')
+                    if recipeName then C.wanted[recipeName]=nil end
+                    C.save(); refreshWishlist(); msg('Removed from wishlist: '..item)
+                end}})
+        end
+        if #names==0 then wishlistRows:Add(label('Your wishlist is empty. Add anything you want to get.'))
+        elseif #names>30 then wishlistRows:Add(label('Showing 30 of '..#names..'. Search to narrow the list.')) end
+    end
+    local function addWish()
+        local name=trim(itemInput:GetText()); local n=number(quantityInput:GetText())
+        if not valid(name) or not n then msg('Error: Enter an item name and quantity of 1 or more.'); return end
+        C.wishes[name]=n; local saved=C.save()
+        itemInput:SetText(''); refreshWishlist()
+        msg(saved and ('Added to wishlist: '..name..' x'..n) or 'Wishlist updated. Saving failed; see chat.')
+    end
+    wishlistWin=UI.Window{id='crafters_ledger_wishlist',title='Wishlist',width=650,height=450,
+        minWidth=560,minHeight=250,escCloses=true,children={
+            row{itemInput,label('Qty',35),quantityInput,UI.Button{text='Add wish',onClick=addWish}},
+            UI.TextField{text='',placeholder='Search wishlist',onChange=function(_,value)
+                wishlistSearch=string.lower(trim(value)); refreshWishlist()
+            end},
+            UI.Scroll{style={height=0,flexGrow=1},children={wishlistRows}},
+        }}
+    refreshWishlist(); wishlistWin:Show()
 end
 local function buildUI()
+    buildStage='start'
     UI=Shroud.UI
     cartStructure=nil; cartCells={}; refreshSummary=nil
     el.search=UI.TextField{text='',placeholder='Recipe name, e.g. Gingerbread',style={flexGrow=1},onSubmit=findRecipes}
@@ -1329,7 +2077,7 @@ local function buildUI()
     el.message=label('Choose a recipe or add materials. Existing shopping targets are preserved.')
     el.item=UI.TextField{text='',placeholder='Exact item name',style={flexGrow=1}}
     el.amount=UI.TextField{text='1',maxLength=7,style={width=70}}
-    el.materials=UI.TextField{text='',placeholder='Bottle of Milk=100; Potato=200',maxLength=4000,style={flexGrow=1}}
+    el.materials=UI.TextField{text='',placeholder='Iron Lantern — make 2; Iron Ingot: 6; Glass Sheet: 2; Chunk of Coal: 6',maxLength=4000,style={flexGrow=1}}
     projectSignature=nil
     el.projects=UI.Column{style={paddingTop=6,paddingBottom=8}}
     el.summary=UI.Label{text='',class='heading',style={fontSize=16,whiteSpace='wrap'}}
@@ -1337,11 +2085,42 @@ local function buildUI()
         onChange=function(_,value) cartQuery=string.lower(trim(value)); page=1; refreshCart() end}
     local viewPicker=UI.Dropdown{choices={'To get','All','Ready'},value='To get',style={width=140},
         onChange=function(_,value) cartFilter=value; page=1; refreshCart() end}
+    local clearArmed=false
+    local clearCartButton,cancelClearButton
+    local function cancelClearCart()
+        clearArmed=false
+        clearCartButton:SetText('Clear cart')
+        cancelClearButton:SetVisible(false)
+    end
+    clearCartButton=UI.Button{text='Clear cart',
+        tooltip='Remove all shopping materials and recipe groups, including hidden and filtered entries',
+        onClick=function()
+            if not clearArmed then
+                clearArmed=true
+                clearCartButton:SetText('Confirm clear ALL')
+                cancelClearButton:SetVisible(true)
+                msg('Clear ALL materials and recipe groups, including entries hidden by filters? Click Confirm clear ALL or Cancel.')
+                return
+            end
+            C.items={}; C.projects={}; C.sources={}; C.amounts={}; C.untracked={}
+            expanded={}; page=1; cartStructure=nil; projectSignature=nil
+            local saved=C.save()
+            cancelClearCart(); refreshCart()
+            msg(saved and 'Cart cleared and saved.' or
+                'Cart cleared in memory. Saving failed; see chat.')
+        end}
+    cancelClearButton=UI.Button{text='Cancel',visible=false,onClick=function()
+        cancelClearCart(); msg('Clear cancelled. Your cart is unchanged.')
+    end}
     -- A zero starting height makes this page fill the remaining window space,
     -- rather than growing the window layout to fit every expanded recipe.
+    buildStage='cart'
     local shopPage=UI.Column{visible=false,style={height=0,flexGrow=1,flexShrink=1},children={
         el.summary,
+        row{label('View',45),UI.Dropdown{choices={'By crafted item','Cart'},value=cartView,style={width=210},
+            onChange=function(_,value) cartView=value; page=1; refreshCart(); if tracker then tracker.signature=nil; refreshTracker() end end}},
         row{listSearch,viewPicker,UI.Button{text='Refresh counts',onClick=function() forgetOwned(); refreshCart() end}},
+        row{UI.Button{text='★ Wishlist',tooltip='Open your wishlist in a separate window',onClick=openWishlist},clearCartButton,cancelClearButton},
         row{label('On-screen tracker (like the quest list):',255),
             UI.Button{text='Show / hide',tooltip='See-through list of what you still need. Drag it by its grip.',
                 onClick=function() setTracker(not trackerShown()) end},
@@ -1350,14 +2129,20 @@ local function buildUI()
             label('Background',85),
             UI.Dropdown{choices=SHADE_NAMES,value=shadeName(C.tracker.shade),style={width=120},
                 onChange=function(_,v) setShade(SHADES[v] or 25) end}},
-        label('Stretch the tracker from any edge. Right-click it to fade it. Its x takes a recipe off the tracker only.'),
-        label('Click + to see materials, - to hide them. Shared materials show combined shopping-list totals.'),
+        row{label('Tracker shows',110),
+            UI.Dropdown{choices={'Still needed','All resources','Ready'},value=C.trackFilter,style={width=155},
+                onChange=function(_,value) setTrackerOption('trackFilter',value) end},
+            label('Layout',65),UI.Dropdown{choices={'By item','Resource list'},value=C.trackView,style={width=145},
+                onChange=function(_,value) setTrackerOption('trackView',value) end}},
+        label('Required = total for your plan. Owned = what you have. Still to get = what is missing.'),
+        label('Plan quantities are calculated. To replace a plan, remove its crafted-item group and add the new quantity.'),
         UI.Scroll{id='ledger_shopping_scroll',style={height=0,flexGrow=1,flexShrink=1},children={el.cart}},
         row{UI.Button{text='Previous',onClick=function() page=math.max(1,page-1); refreshCart() end},el.cartPage,
             UI.Button{text='Next',onClick=function() page=page+1; refreshCart() end}},
     }}
+    buildStage='recipes'
     local browse=UI.Column{style={width=310,flexShrink=0,paddingRight=14},children={
-        label('Find a recipe'),row{el.search,UI.Button{text='Find',onClick=findRecipes}},
+        label('Learned recipes'),
         UI.Scroll{style={flexGrow=1},children={el.matches}},
         row{UI.Button{text='<',onClick=function() recipePage=math.max(1,recipePage-1); renderMatches() end},
             el.matchPage,UI.Button{text='>',onClick=function()
@@ -1369,10 +2154,46 @@ local function buildUI()
         label('Recipe details'),row{label('Crafting attempts',145),el.crafts},
         UI.Scroll{style={flexGrow=1},children={el.preview}},
         label('Quantities above are multiplied by crafting attempts, not finished item count.'),
-        UI.Button{text='Add ingredients to shopping list',onClick=function() addRecipe(false) end},
+        UI.Button{text='Add ingredients to cart',onClick=function() addRecipe(false) end},
         UI.Button{text='Label existing materials with this recipe',onClick=function() addRecipe(true) end},
     }}
     local recipesPage=UI.Row{visible=true,style={flexGrow=1,alignItems='stretch'},children={browse,plan}}
+    el.bulkInput=UI.TextField{text='',placeholder='2 x Iron Lantern — press Enter to add a row',maxLength=12000,
+        style={flexGrow=1},onSubmit=enterPlanItems,onChange=function() resetBulkPlan() end}
+    el.bulkEntered=UI.Label{text='No items entered yet.',style={whiteSpace='wrap',fontSize=14}}
+    el.bulkStatus=label('Search for an item, choose it, then add its materials.')
+    el.bulkPreview=UI.Column{style={flexShrink=0,paddingRight=18}}
+    el.simpleSearch=UI.TextField{text='',placeholder='Search learned recipes, e.g. lantern',style={flexGrow=1},
+        onChange=function() simplePicked=nil; resetBulkPlan(); el.simpleSelected:SetText('Choose an item below.'); searchSimpleRecipes() end}
+    el.simpleQuantity=UI.TextField{text='1',maxLength=5,style={width=70},onChange=function() resetBulkPlan() end}
+    el.simpleMatches=UI.Column{style={flexShrink=0}}
+    el.simpleSelected=label('Choose an item below.')
+    local pasteSection=UI.Column{visible=false,style={flexShrink=0},children={
+        label('Paste a list, or press Enter after each item. Example: 2 x Iron Lantern'),
+        el.bulkInput,
+        UI.Scroll{style={height=60,flexGrow=0,flexShrink=0},children={el.bulkEntered}},
+        row{UI.Button{text='Add list to cart',onClick=addPastedPlan},
+            UI.Button{text='Clear draft',onClick=function()
+                resetBulkPlan(); enteredPlanItems={}; el.bulkInput:SetText(''); showEnteredPlanItems()
+            end}},
+    }}
+    local pasteVisible=false
+    el.simpleResultsScroll=UI.Scroll{style={height=28,flexGrow=0,flexShrink=0},children={el.simpleMatches}}
+    buildStage='crafting'
+    local bulkPage=UI.Column{visible=false,style={height=0,flexGrow=1,flexShrink=1,justifyContent='start'},children={
+        row{el.simpleSearch,label('Quantity',75),el.simpleQuantity},
+        el.simpleResultsScroll,
+        el.simpleSelected,
+        row{UI.Button{text='Add to cart',style={width=190,height=30,flexGrow=0},onClick=addSimpleItem},
+        UI.Button{text='Paste a list...',style={width=140,height=30,flexGrow=0},onClick=function()
+            pasteVisible=not pasteVisible; pasteSection:SetVisible(pasteVisible)
+            resetBulkPlan(); enteredPlanItems={}; el.bulkInput:SetText(''); showEnteredPlanItems()
+        end}},
+        pasteSection,
+        el.bulkStatus,
+        UI.Scroll{id='ledger_bulk_scroll',style={height=0,flexGrow=1},children={el.bulkPreview}},
+    }}
+    buildStage='materials'
     local manualPage=UI.Column{visible=false,style={flexGrow=1},children={
         label('Add a material'),label('Use the exact in-game item name. Add increases your target; Set target replaces it.'),
         row{el.item,el.amount},
@@ -1381,16 +2202,22 @@ local function buildUI()
             if not valid(name) or not n then msg('Enter an item and a positive whole quantity.'); return end
             C.set(name,n); refreshCart(); msg('Updated target for '..name..'.')
         end}},
-        label('Paste a material list'),label('Example: Bottle of Milk=100; Potato=200'),
-        el.materials,UI.Button{text='Add pasted materials',onClick=importList},
+        label('For item names and quantities only, use Crafting plan to calculate resources.'),
+        label('Paste materials or item headings with their materials'),
+        label('Heading: Iron Lantern — make 2. Under it: Iron Ingot: 6. Amounts are totals for the batch.'),
+        label('Separate lines with Enter or semicolons. Plain Item=quantity lists still work.'),
+        el.materials,
+        UI.Button{text='Add pasted items and materials',onClick=function() importList(false) end},
+        UI.Button{text='Group existing materials (keep quantities)',onClick=function() importList(true) end},
         UI.Label{text='',style={flexGrow=1}},
     }}
     el.itemSearch=UI.TextField{text='',placeholder='Item name or words from it, e.g. black pearl',style={flexGrow=1},onSubmit=findItems}
     el.itemAmount=UI.TextField{text='1',maxLength=7,style={width=70}}
     el.itemResults=UI.Column{style={flexShrink=0,paddingRight=18}}
     el.itemPage=label('')
-    el.itemStatus=label('Searches every item your recipes make or use, your bag and your shopping list. For anything else, type its full name.')
+    el.itemStatus=label('Searches every item your recipes make or use, your bag and your cart. For anything else, type its full name.')
     itemCells={}
+    buildStage='item search'
     local itemsPage=UI.Column{visible=false,style={height=0,flexGrow=1,flexShrink=1},children={
         row{el.itemSearch,UI.Button{text='Find',onClick=findItems},label('Amount to add',110),el.itemAmount},
         el.itemStatus,
@@ -1398,15 +2225,123 @@ local function buildUI()
         row{UI.Button{text='Previous',onClick=function() itemPage=math.max(1,itemPage-1); renderItems() end},el.itemPage,
             UI.Button{text='Next',onClick=function() itemPage=itemPage+1; renderItems() end}},
     }}
-    local pages={['Shopping list']=shopPage,Recipes=recipesPage,['Add materials']=manualPage,['Find items']=itemsPage}
-    local activePage='Recipes'
-    local navLabel=label('Recipes')
+    el.missingStatus=label('')
+    el.missingRows=UI.Column{style={flexShrink=0,paddingRight=18}}
+    el.missingPage=label('')
+    buildStage='missing recipes'
+    local missingSection=UI.Column{visible=false,style={height=0,flexGrow=1,flexShrink=1},children={
+
+        label('Want recipe saves it here. Shop recipe adds one Recipe: scroll to your cart.'),
+        row{UI.Button{text='Refresh recipes',onClick=startMissing},
+            UI.Toggle{text='Kronic recipes only',value=missingKronic,onChange=function(_,v)
+                missingKronic=v==true; startMissing()
+            end}},
+        label('Compared with the bundled master list. Unknown levels appear last. Refresh after learning a recipe.'),
+        el.missingStatus,
+        UI.Scroll{id='ledger_missing_scroll',style={height=0,flexGrow=1,flexShrink=1},children={el.missingRows}},
+        row{UI.Button{text='Previous',onClick=function() missingPage=math.max(1,missingPage-1); renderMissing() end},
+            el.missingPage,UI.Button{text='Next',onClick=function() missingPage=missingPage+1; renderMissing() end}},
+    }}
+    el.activityRows=UI.Column{style={flexShrink=0,paddingRight=18}}
+    el.activityPage=label('')
+    refreshActivity=function()
+        if not el.activityRows then return end
+        activityDirty=false; el.activityRows:Clear()
+        local pages=math.max(1,math.ceil(#activityHistory/10))
+        activityPage=math.max(1,math.min(activityPage,pages))
+        for i=(activityPage-1)*10+1,math.min(activityPage*10,#activityHistory) do
+            local entry=activityHistory[i]
+            local children={UI.Label{text=entry.text,style={color='#'..entry.color,whiteSpace='wrap',fontSize=15}}}
+            if entry.details then
+                children[#children+1]=UI.Label{text=table.concat(entry.details,'\n'),
+                    style={paddingLeft=18,whiteSpace='wrap',fontSize=14}}
+            end
+            el.activityRows:Add(UI.Column{style={paddingBottom=14,flexShrink=0},children=children})
+        end
+        if #activityHistory==0 then el.activityRows:Add(label('No activity yet. Add items or use your cart.')) end
+        el.activityPage:SetText('Page '..activityPage..' / '..pages..' — '..#activityHistory..' actions')
+    end
+    buildStage='activity'
+    local activitySection=UI.Column{visible=false,style={height=0,flexGrow=1,flexShrink=1},children={
+        label('Activity — newest first. Keeps the last 100 messages during this session.'),
+        UI.Button{text='Clear history',tooltip='Clear only the activity history, not your cart',onClick=function()
+            activityHistory={}; activityPage=1; activityDirty=true; refreshActivity()
+        end},
+        UI.Scroll{id='ledger_activity_scroll',style={height=0,flexGrow=1},children={el.activityRows}},
+        row{UI.Button{text='Previous',onClick=function() activityPage=math.max(1,activityPage-1); refreshActivity() end},
+            el.activityPage,UI.Button{text='Next',onClick=function() activityPage=activityPage+1; refreshActivity() end}},
+    }}
+    local addMode='Craft something'
+    local resourceAdvanced=false
+    local recipeMode='Learned'
+    local recipeQuery=''
+    local function selectAddMode(value)
+        addMode=value
+        bulkPage:SetVisible(value=='Craft something')
+        itemsPage:SetVisible(value=='Find/add resources' and not resourceAdvanced)
+        manualPage:SetVisible(value=='Find/add resources' and resourceAdvanced)
+        if value=='Craft something' then searchSimpleRecipes()
+        elseif not itemIndex then startIndex(); renderItems() end
+    end
+    local advancedButton
+    advancedButton=UI.Button{text='Paste resource quantities...',onClick=function()
+        resourceAdvanced=not resourceAdvanced
+        advancedButton:SetText(resourceAdvanced and 'Back to resource search' or 'Paste resource quantities...')
+        selectAddMode('Find/add resources')
+    end}
+    local resourceTools=UI.Column{visible=false,style={flexShrink=0},children={advancedButton}}
+    local addPicker=UI.Dropdown{choices={'Craft something','Find/add resources'},value=addMode,style={width=220},
+        onChange=function(_,value)
+            resourceTools:SetVisible(value=='Find/add resources'); selectAddMode(value)
+        end}
+    local addSection=UI.Column{visible=false,style={height=0,flexGrow=1,flexShrink=1},children={
+        row{label('I want to',85),addPicker},resourceTools,bulkPage,itemsPage,manualPage,
+    }}
+    local function selectRecipeMode(value)
+        recipeMode=value
+        recipesPage:SetVisible(value=='Learned')
+        missingSection:SetVisible(value~='Learned')
+        if value=='Learned' then el.search:SetText(recipeQuery); findRecipes()
+        else
+            missingView=value=='Wishlist' and 'Recipes wanted' or 'Missing recipes'
+            missingQuery=string.lower(trim(recipeQuery)); missingPage=1
+            if value=='Missing' then startMissing() else renderMissing() end
+        end
+    end
+    local recipesSearch=UI.TextField{text='',placeholder='Search recipes, e.g. lantern',style={flexGrow=1},
+        onChange=function(_,value)
+            recipeQuery=value; el.search:SetText(value)
+            missingQuery=string.lower(trim(value)); missingPage=1
+            if recipeMode=='Learned' then findRecipes() else renderMissing() end
+        end}
+    local recipePicker=UI.Dropdown{choices={'Learned','Missing'},value=recipeMode,style={width=160},
+        onChange=function(_,value) selectRecipeMode(value) end}
+    local recipesSection=UI.Column{visible=false,style={height=0,flexGrow=1,flexShrink=1},children={
+        row{recipesSearch,recipePicker},recipesPage,missingSection,
+    }}
+    local pages={['Add items']=addSection,['Cart']=shopPage,Recipes=recipesSection,Activity=activitySection}
+    local navLabel=UI.Label{text='Add items',class='heading',style={fontSize=16,flexGrow=1}}
+    local navButtons={}
     navigate=function(name)
-        activePage=name
+        if name=='Crafting plan' then
+            name='Add items'; addPicker:SetValue('Craft something'); resourceTools:SetVisible(false); selectAddMode('Craft something')
+        elseif name=='Find items' or name=='Add materials' then
+            resourceAdvanced=name=='Add materials'; name='Add items'
+            addPicker:SetValue('Find/add resources'); resourceTools:SetVisible(true)
+            advancedButton:SetText(resourceAdvanced and 'Back to resource search' or 'Paste resource quantities...')
+            selectAddMode('Find/add resources')
+        elseif name=='Missing Recipes' then
+            name='Recipes'; recipePicker:SetValue('Missing'); selectRecipeMode('Missing')
+        end
         for key,section in pairs(pages) do section:SetVisible(key==name) end
         navLabel:SetText(name)
-        if name=='Shopping list' then refreshCart() end
-        if name=='Find items' and not itemIndex then startIndex(); renderItems() end
+        for key,button in pairs(navButtons) do
+            button:SetStyle{color=key==name and '@gold' or '#C9D5DF',backgroundColor=key==name and '#151B23DD' or '#00000033'}
+        end
+        if name=='Activity' then refreshActivity() end
+        if name=='Add items' then selectAddMode(addMode) end
+        if name=='Cart' then refreshCart() end
+        if name=='Recipes' then selectRecipeMode(recipeMode) end
     end
     el.counting=label(countingText()..' | Updates automatically | Saved between sessions')
     local invToggle,acctToggle
@@ -1431,19 +2366,29 @@ local function buildUI()
     acctToggle=UI.Toggle{text='Account',value=C.countAcct,
         tooltip='Count your bank, house chests, other characters, mail and vendor listings',
         onChange=function(_,v) countsChanged('acct',v) end}
+    for _,entry in ipairs({
+        {'Add items','Add items',130},{'Cart','Cart',140},
+        {'Recipes','Recipes',120},{'Activity','Activity',120},
+    }) do
+        local key=entry[1]
+        navButtons[key]=UI.Button{text=entry[2],style={width=entry[3],height=32,fontSize=14,flexShrink=0},
+            onClick=function() navigate(key) end}
+    end
+    buildStage='main window'
     win=UI.Window{id='crafters_ledger_v3',title="Crafters Ledger",width=1000,height=650,
         minWidth=900,minHeight=460,x=70,y=70,escCloses=true,
         style={paddingLeft=16,paddingRight=16,paddingTop=10,paddingBottom=10},children={
-            row{UI.Button{text='Recipes',onClick=function() navigate('Recipes') end},
-                UI.Button{text='Shopping list',onClick=function() navigate('Shopping list') end},
-                UI.Button{text='Add materials',onClick=function() navigate('Add materials') end},
-                UI.Button{text='Find items',onClick=function() navigate('Find items') end},
-                UI.Label{text='',style={flexGrow=1}},label('Count:',55),invToggle,acctToggle},
-            navLabel,shopPage,recipesPage,manualPage,itemsPage,
+            UI.Row{style={alignItems='center',flexShrink=0,marginBottom=8},children={
+                navButtons['Add items'],navButtons['Cart'],navButtons.Recipes,navButtons.Activity,
+            }},
+            row{navLabel,label('Count resources in:',140),invToggle,acctToggle},
+            addSection,shopPage,recipesSection,activitySection,
             el.message,
             el.counting,
         }}
-    preview(); refreshCart(); win:Show()
+    buildStage='initial refresh'
+    preview(); refreshCart(); navigate('Crafting plan'); win:Show()
+    buildStage='running'
 end
 -- Chat commands queue work; only the add-on's callbacks touch Shroud.UI.
 local openRequested=false
@@ -1458,15 +2403,28 @@ end
 local function openWindow()
     if not win then buildUI() else win:Show(); refreshCart() end
 end
+local function registerChatCommand(name,help,run)
+    if not Shroud or not Shroud.Command then return false,'Commands unavailable' end
+    local ok,registered,reason=pcall(function()
+        return Shroud.Command{name=name,help=help,run=run}
+    end)
+    if not ok then return false,tostring(registered) end
+    if not registered then return false,tostring(reason or 'Registration rejected') end
+    return true
+end
 function ShroudOnStart()
+    lifecycle('Enabled','00FF00')
     openRequested=true
-    if Shroud and Shroud.Command then
-        local ok,err=pcall(Shroud.Command,'shopping',function() C.open() end)
-        if not ok then say('Use /lua code ShoppingCart.open() to open the cart.') end
+    local registered,reason=registerChatCommand('ledger','Open Crafters Ledger.',function() C.open() end)
+    if registered then
+        if type(ShroudConsoleLog)=='function' then ShroudConsoleLog('[FFFF00]/ledger[-]')
+        else print('/ledger') end
+    else
+        say('Could not register /ledger: '..tostring(reason)..'. Use the book icon.')
     end
-    if Shroud and Shroud.Command then pcall(Shroud.Command,'basket',function() C.open() end) end
-    if Shroud and Shroud.Command then pcall(Shroud.Command,'ledger',function() C.open() end) end
-    if Shroud and Shroud.Command then pcall(Shroud.Command,'ledgertrack',function() C.tracker_toggle() end) end
+    registerChatCommand('shopping','Open Crafters Ledger.',function() C.open() end)
+    registerChatCommand('basket','Open Crafters Ledger.',function() C.open() end)
+    registerChatCommand('ledgertrack','Show or hide the shopping tracker.',function() C.tracker_toggle() end)
     if C.tracker.shown then trackerToggleRequested=true; C.tracker.shown=false end
     if Shroud and Shroud.Keybind then
         local bound,reason=pcall(Shroud.Keybind,{id='toggle',label="Show/hide Crafters Ledger",
@@ -1485,7 +2443,7 @@ function ShroudOnStart()
             end
             local button
             if texture>=0 and UI.IconButton then
-                button=UI.IconButton{texture=texture,tooltip="Crafters Ledger - open your shopping list",
+                button=UI.IconButton{texture=texture,tooltip="Crafters Ledger - open your cart",
                     style={width=46,height=46},onClick=function() C.toggle() end}
             else
                 button=UI.Button{text="Ledger",tooltip="Crafters Ledger - copy icon.png into the add-on folder",
@@ -1501,6 +2459,17 @@ local saveTimer=0
 local cartVersion,trackVersion=0,0
 local warmAt=3              -- seconds after login: start the item list and account counts in the background
 function ShroudOnUpdate()
+    if activityDirty and refreshActivity and el.activityRows then
+        local ok,err=pcall(refreshActivity)
+        if not ok then activityDirty=false; print('Activity display unavailable: '..tostring(err)) end
+    end
+    if bulkJob then
+        local ok,err=pcall(bulkPlanStep)
+        if not ok then
+            bulkJob=nil; bulkPlan=nil
+            if el.bulkStatus then el.bulkStatus:SetText('Could not preview the plan. Nothing added: '..tostring(err)); msg('Error: Could not calculate crafting plan: '..tostring(err)) end
+        end
+    end
     if toggleRequested then
         toggleRequested=false
         local ok,err=pcall(function()
@@ -1525,6 +2494,7 @@ function ShroudOnUpdate()
     saveTimer=saveTimer+dt
     if saveTimer>=120 then saveTimer=0; saveCounts() end
     local ok2,err2=pcall(function()
+        missingStep()
         pumpOwned()
         if indexJob and indexStep() then
             findItems()
@@ -1585,6 +2555,9 @@ function ShroudOnInventoryChanged()
     end
 end
 function ShroudOnDisableScript()
+    if sourceWindow then pcall(function() sourceWindow:Destroy() end); sourceWindow=nil end
+    if wishlistWin then pcall(function() wishlistWin:Destroy() end); wishlistWin=nil end
+    lifecycle('Disabled','FF0000')
     saveCounts()
     openRequested=false; toggleRequested=false
     if win then pcall(function() win:Destroy() end); win=nil end

@@ -1,37 +1,33 @@
 # Crafters Ledger
 
-Creator: Kronic | Version 3.3.0
+Creator: Kronic | Version 3.4.0
 
-A crafting planner and saved shopping list. Search your recipe book, see the required skill level and expected output, and choose how many times you want to craft. Add the ingredients to your shopping list, grouped under the item you are making so you always know what your supplies are for.
+Open with /ledger, the ledger icon, or a shortcut configured in Add-Ons. Toggle the on-screen Shopping list with /ledgertrack.
 
-Click + beside an item to see its materials, or - to collapse them. The list compares what you have with what you need and updates automatically as you collect or use supplies. Filter by To get, All, or Ready, or search for a recipe or material.
+## Add items
+Choose Craft something, search learned recipes, select an item, enter the finished quantity and Add to cart. Material alternatives appear in the preview. Paste a list accepts 2 x Iron Lantern or Iron Lantern: 2, separated by newlines or semicolons. Enter queues each row. Valid items add; unresolved ones remain in the draft with an Activity error. Calculations use prepared components, not recursively expanded raw materials.
 
-Made a mistake? Type a new amount in a material's Needed box and press Enter or Set. Click X beside a recipe, then Sure?, to take the whole recipe and its materials off the list; materials another recipe also uses stay, with that recipe's amount.
+Choose Find/add resources to search what you own and where it is stored, or add resource quantities directly. Paste resource quantities opens the advanced importer. Existing Item=quantity lists and item/material groups remain supported.
 
-Add individual materials or paste a custom list. You can also label existing supplies with a recipe without increasing their quantities. Your list and recipe labels are saved between sessions.
+## Cart and Wishlist
+Switch between By crafted item and Cart (combined resources). Required is the total for the plan; Owned counts selected Inventory/Account sources; Still to get is the remaining shortage. Note identifies the crafted items. Calculated quantities are read-only. Remove a crafted-item group and add the desired plan again to replace it. Clear cart requires confirmation.
 
-Show or hide Crafters Ledger with the book-and-quill icon or its key in the Add-Ons window. Open it with /ledger.
+The star Wishlist button opens a separate window. Add any item name and quantity, then Add to cart when needed. Repeated clicks do not increase the target repeatedly. Clearing the cart preserves your wishlist.
 
-## Find items
+## Recipes
+Learned and Missing share one search box; blank searches show no results. Missing compares your known recipes with MasterRecipes.lua and cannot discover entries absent from that file. Wishlist saves the recipe for later; Add to cart adds its Recipe: scroll. This does not purchase it or guarantee it is sold by NPCs. Refresh after learning recipes.
 
-Type a name or any words from it, in any order, like black pearl or garnet. Find items searches every item your recipes make or use, everything in your bag and your shopping list. For anything else, type its full name. Each item shows how many you have, and if it is on your shopping list, how many you need and how many are still to get. Add puts it on your list.
+## Shopping list tracker and Activity
+Show/hide the tracker from Cart. Its filter (Still needed / All resources / Ready), layout (By item / Resource list) and background are saved. Rows show only the remaining quantity by default. Resize or use the window's text/opacity controls. The information symbol toggles a separate Source popup without needing the main window open.
 
-Click + beside an item to see where it is: your bag, your bank and each house lot, each with its own total. Click + beside a place to see the containers in it, such as a Wooden Storage Chest or a bag you carry.
+Activity keeps the last 100 messages for the current Lua session: green additions, red problems/removals, blue information. Clear history does not clear the cart. Full errors append to CraftersLedger-errors.log.
 
-Find a chest again with the compass: stand next to it and click Mark on its line once. After that, Compass points the game's compass at it whenever you are in that scene. Clear compass stops pointing, Re-mark updates the spot if you move the chest, and Unmark forgets it. Click Name to give any container your own name, like Reagent Chest.
+## Sources
+Sources.lua contains a small verified offline reference set: Recipe: Iron Lantern, Wax, Maple Binding and three crafting-chest patterns. Other entries show Unknown. Reference URLs are selectable for copying. Vendor data is not live.
 
-## What Have counts
+## Installation and updates
+Install from Community Addons, or extract the complete crafters-ledger folder into your Lua add-on folder. Keep manifest.json, MasterRecipes.lua, Sources.lua, CraftersLedger.lua and icon.png together. Enable Crafters Ledger and run /lua reload. Disable the separate test add-on before checking production.
 
-Use the Inventory and Account checkboxes at the top to choose what Have counts: your bag, your account (bank, house chests, other characters, mail, vendor listings), or both. They apply to Find items, the shopping list, recipe details and the tracker. Account counts need a game client with Lua API 55 or later. The last counts are saved, so they show as soon as you open the window while fresh ones are fetched.
+Production uses CraftersLedger-data.tsv and CraftersLedger-counts.tsv in the main Lua folder. Preserve these files when updating. Test data remains separate and is not copied automatically. API 37+ is required; account-wide counts require API 55+.
 
-## On-screen tracker
-
-Turn it on from the shopping list (Show / hide) or with /ledgertrack. It shows what you still need, grouped by recipe like the quest list, and its title bar only shows when you point at it. Stretch it from any edge, right-click it to fade it, or pick a background shade (None, Light, Medium, Dark). Click x on a recipe to take it off the tracker; it stays on your shopping list, and Track all brings it back. It remembers its place and size.
-
-## Installation
-
-Import or extract the complete crafters-ledger folder, including manifest.json and icon.png. Disable older copies before enabling this version. Keep CraftersLedger-data.tsv and ShoppingCart-data.tsv in the main Lua folder to preserve saved lists. Run /lua reload after updating.
-
-## 3.2.13
-
-The shopping list now stays inside the available window area. Scroll with the mouse wheel or drag the native scrollbar when expanded recipes extend below the list. Search, filters, totals, and page controls stay outside the scrolling area.
+Your existing inventory-location search, container labels and compass marks remain supported. Stand beside a chest to mark its location before using its compass action.
